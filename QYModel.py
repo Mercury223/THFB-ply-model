@@ -1343,10 +1343,16 @@ class VaneBladeAndEndwallBuilder:
                     fillet_solid = self._make_fillet_solid_arc(
                         float(outer_profile["radius"]), r, thickness,
                         s0, s1)
-                else:
+                elif on_lower_straight or on_upper_straight:
                     fillet_solid = self._make_fillet_solid_straight(
                         float(outer_profile["radius"]), r, thickness,
                         s0, s1, outer_profile)
+                else:
+                    # transition band: split at arc boundary
+                    fillet_solid = self._make_fillet_solid_transition(
+                        float(outer_profile["radius"]), r, thickness,
+                        s0, s1, outer_profile,
+                        arc_start, arc_end)
             else:
                 fillet_solid = None
 
@@ -1402,7 +1408,84 @@ class VaneBladeAndEndwallBuilder:
 
         print(f"[铺层带实体] {success}/{len(stations) - 1} bands generated"
               + (f", {failed} failed" if failed else ""))
+
+        # 自检
+        if solids:
+            self._validate_band_solids(solids, outer_profile)
         return solids
+
+    def _validate_band_solids(self, solids, outer_profile):
+        """自检: 验证每个 band solid 在 blade / fillet / endwall 区域都有材料.
+
+        测试点选取:
+          - blade:  mid-band 处, r=R-t/2, z=blade_h*0.7
+          - fillet: mid-band 处, 内外弧中点, z=mid-angle 高度
+          - endwall: mid-band 处, r=R+r/2, z=-t/2
+        方向向量使用 band 中点处的实际外法向 (pt_m/normal).
+        """
+        from OCP.BRepClass3d import BRepClass3d_SolidClassifier
+        from OCP.gp import gp_Pnt
+        from OCP.TopAbs import TopAbs_IN
+
+        p = self.p
+        R = float(p.outer_radius)
+        r = float(p.root_fillet_radius)
+        t = float(p.ply_layer_thickness)
+        blade_h = float(p.blade_height)
+        stations = self._make_ply_station_s_values(outer_profile)
+
+        errors = []
+
+        for idx in range(len(stations) - 1):
+            key = f"ply_band_{idx:04d}_solid"
+            if key not in solids:
+                continue
+            solid = solids[key]
+
+            sm = 0.5 * (stations[idx] + stations[idx + 1])
+            pt_m, tangent, normal = self._outer_profile_point_tangent_normal_at_s(
+                outer_profile, sm)
+
+            def point_inside(pt_along_normal, zz):
+                """pt_along_normal: 沿外法向距离 blade 表面的偏移; zz: Z 坐标."""
+                pt = cq.Vector(
+                    pt_m.x + normal.x * pt_along_normal,
+                    pt_m.y + normal.y * pt_along_normal,
+                    zz)
+                c = BRepClass3d_SolidClassifier(solid.wrapped)
+                c.Perform(gp_Pnt(pt.x, pt.y, pt.z), 1e-3)
+                return c.State() == TopAbs_IN
+
+            # Blade: 向内 (opposite normal) t/2, 在 blade 中上部
+            if not point_inside(-t * 0.5, blade_h * 0.7):
+                errors.append(f"band {idx}: blade region empty")
+
+            # Fillet: 内外弧中点 (mid-angle φ=45°, 厚度方向中间)
+            if r > 1e-9:
+                phi = math.pi / 4.0
+                outer_off = r * (1.0 - math.cos(phi))   # ≈ 0.586 for r=2
+                outer_z = r * (1.0 - math.sin(phi))
+                inner_off_offset = -(t * math.cos(phi))  # 内弧相对外弧的偏移差
+                inner_z_offset = -t * math.sin(phi)
+                fil_off = outer_off + inner_off_offset * 0.5
+                fil_z = outer_z + inner_z_offset * 0.5
+                if fil_off < -t * 0.9:
+                    fil_off = r * 0.3
+                    fil_z = r * 0.3
+                if not point_inside(fil_off, fil_z):
+                    errors.append(f"band {idx}: fillet region empty")
+
+            # Endwall: 沿 normal 方向 r/2, z=-t/2 (endwall 中间深度)
+            if not point_inside(r * 0.5, -t * 0.5):
+                errors.append(f"band {idx}: endwall region empty")
+
+        if errors:
+            print(f"[VALIDATION FAILED] {len(errors)} errors:")
+            for e in errors:
+                print(f"  - {e}")
+        else:
+            print(f"[VALIDATION PASSED] all {len(solids)} bands OK"
+                  f" (blade + fillet + endwall)")
 
     # ── Fillet solid helpers ──
 
@@ -1420,9 +1503,12 @@ class VaneBladeAndEndwallBuilder:
         return θ0, θ1
 
     def _make_fillet_solid_arc(self, R, r, thickness, s0, s1):
-        """Arc bands: 四分之一圆环截面绕 Z 轴回转生成倒圆实体.
+        """Arc bands 倒圆实体: 四分之一圆环截面绕 Z 轴回转.
 
-        使用 OCP BRepPrimAPI_MakeRevol (CadQuery 的 revolve 有 bug).
+        截面构建 (XZ 面):
+          外弧: center=(R+r, r), radius=r,   (R, r) → (R+r, 0)
+          内弧: center=(R+r, r), radius=r+t, (R+r, -t) → (R-t, r)
+        外弧和内弧同心，内弧半径 r+t > r，往 blade 内部/endwall 下方偏移。
         """
         import math as _math
         from OCP.BRepPrimAPI import BRepPrimAPI_MakeRevol
@@ -1436,16 +1522,20 @@ class VaneBladeAndEndwallBuilder:
         if span < 0.01:
             return None
 
+        r_outer = float(r)
+        r_inner = r_outer + t          # ← 关键: 内弧半径 > 外弧半径，往内/下偏
+        cx, cz = R + r_outer, r_outer  # 圆心
+
         profile_wp = (
             cq.Workplane("XZ")
-            .moveTo(R, r)
+            .moveTo(R, r_outer)                          # 外弧起点 (blade 接点)
             .threePointArc(
-                (R + r - r / sqrt2, r - r / sqrt2),
-                (R + r, 0.0))
-            .lineTo(R + r, t)
+                (cx - r_outer / sqrt2, cz - r_outer / sqrt2),
+                (R + r_outer, 0.0))                       # 外弧终点 (endwall 接点)
+            .lineTo(R + r_outer, -t)                      # 直下到内弧起点
             .threePointArc(
-                (R + r - (r - t) / sqrt2, r - (r - t) / sqrt2),
-                (R + t, r))
+                (cx - r_inner / sqrt2, cz - r_inner / sqrt2),
+                (R - t, r_outer))                          # 内弧终点 (blade 内侧)
             .close()
         )
 
@@ -1465,42 +1555,103 @@ class VaneBladeAndEndwallBuilder:
         return solid
 
     def _make_fillet_solid_straight(self, R, r, thickness, s0, s1, outer_profile):
-        """Straight bands: quarter-cylinder along straight blade direction."""
+        """Straight bands 倒圆实体: 四分之一圆环截面沿切线方向拉伸.
+
+        截面放置在 band 起点 s0, 向 s1 方向 (tangent) 拉伸 seg_len.
+        """
+        import math as _math
+        from OCP.BRepPrimAPI import BRepPrimAPI_MakePrism
+        from OCP.gp import gp_Vec
+
+        sqrt2 = _math.sqrt(2.0)
         t = float(thickness)
-        sm = 0.5 * (s0 + s1)
-        _, tangent, normal = self._outer_profile_point_tangent_normal_at_s(
-            outer_profile, sm)
         seg_len = s1 - s0
 
-        # 在 XY 面构建矩形 face, 代表倒圆截面的近似
-        # 沿法向宽 = r+thickness, 沿切线长 = seg_len
-        rect_w = r + t
-        rect_h = seg_len
-        root_m, _, _ = self._outer_profile_point_tangent_normal_at_s(
-            outer_profile, sm)
+        # 使用 band 起点 s0 处的位置和方向
+        pt_start, tangent, normal = self._outer_profile_point_tangent_normal_at_s(
+            outer_profile, s0)
 
-        center_x = root_m.x + normal.x * (R + rect_w * 0.5 - R + r * 0.5)
-        center_y = root_m.y + normal.y * (R + rect_w * 0.5 - R + r * 0.5)
-        # 简化: 使用 endwall_start 位置
-        ew_center = cq.Vector(
-            root_m.x + normal.x * (R + r * 0.5 + t * 0.5),
-            root_m.y + normal.y * (R + r * 0.5 + t * 0.5),
-            r * 0.5)
+        r_outer = float(r)
+        r_inner = r_outer + t
+        cx, cz = R + r_outer, r_outer
+
+        # 1) 创建截面
+        profile_wp = (
+            cq.Workplane("XZ")
+            .moveTo(R, r_outer)
+            .threePointArc(
+                (cx - r_outer / sqrt2, cz - r_outer / sqrt2),
+                (R + r_outer, 0.0))
+            .lineTo(R + r_outer, -t)
+            .threePointArc(
+                (cx - r_inner / sqrt2, cz - r_inner / sqrt2),
+                (R - t, r_outer))
+            .close()
+        )
 
         try:
-            bar = (
-                cq.Workplane("XY")
-                .transformed(offset=ew_center)
-                .box(r + t, seg_len, r, centered=True)
-                .val()
-            )
-            angle = math.degrees(math.atan2(tangent.y, tangent.x))
-            if abs(angle) > 1e-9:
-                bar = bar.rotate((0, 0, 0), (0, 0, 1), angle)
+            face = cq.Face.makeFromWires(profile_wp.val())
         except Exception:
             return None
 
-        return bar
+        # 2) 绕 Z 旋转使 X 对齐 normal
+        angle = _math.degrees(_math.atan2(normal.y, normal.x))
+        if abs(angle) > 1e-9:
+            face = face.rotate((0, 0, 0), (0, 0, 1), angle)
+
+        # 3) 平移到 s0 位置
+        face = face.translate(cq.Vector(
+            pt_start.x - normal.x * R,
+            pt_start.y - normal.y * R,
+            0.0))
+
+        # 4) 沿 tangent 拉伸
+        try:
+            prism_vec = gp_Vec(
+                tangent.x * seg_len,
+                tangent.y * seg_len,
+                0.0)
+            prism = BRepPrimAPI_MakePrism(face.wrapped, prism_vec)
+            prism.Build()
+            return cq.Solid(prism.Shape())
+        except Exception:
+            return None
+
+    def _make_fillet_solid_transition(self, R, r, thickness, s0, s1,
+                                       outer_profile, arc_s, arc_e):
+        """Transition band: split into straight + arc sub-bands."""
+        t = float(thickness)
+
+        if s0 < arc_s < s1:
+            s_straight = (s0, arc_s)
+            s_arc = (arc_s, s1)
+        elif s0 < arc_e < s1:
+            s_straight = (arc_e, s1)
+            s_arc = (s0, arc_e)
+        else:
+            return None
+
+        sub_solids = []
+        for (sa, sb), is_arc in [
+            (s_straight, False),
+            (s_arc, True),
+        ]:
+            if sb - sa < 0.01:
+                continue
+            if is_arc:
+                sub = self._make_fillet_solid_arc(R, r, t, sa, sb)
+            else:
+                sub = self._make_fillet_solid_straight(
+                    R, r, t, sa, sb, outer_profile)
+            if sub is not None:
+                sub_solids.append(sub)
+
+        if not sub_solids:
+            return None
+        result = sub_solids[0]
+        for s in sub_solids[1:]:
+            result = result.fuse(s)
+        return result
 
     def _thicken_face_to_solid(self, face, thickness):
         """将曲面沿法向加厚为实体。

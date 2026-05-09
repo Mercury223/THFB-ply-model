@@ -24,18 +24,26 @@
 
 **修复**：改为 `radial = r*(1-cos(θ)), z = r*(1-sin(θ))`，形成内凹曲线。
 
-### 1.3 铺层带实体加厚边界错误 (2026-05-09)
+### 1.3 铺层带实体加厚 — 三次迭代修复 (2026-05-09)
 
-**根因 (第一次修复)**：`build_ply_band_solids` 中 endwall 面的左右边界使用 blade 曲线端点直接连到 expanded 曲线端点（单一直线段），未经过倒圆末端点 `endwall_start`。
+**第一次修复**：endwall 面边界改为两段式路径 (blade → endwall_start → expanded)，与 side_a/side_b 一致。
 
-**修复**：endwall 面的左右边界改为 blade_curve → endwall_start → expanded_curve 两段式路径。
+**第二次修复 — 倒圆段缺失**：发现 band 实体缺少 fillet 段（z=0~r）。新增 fillet 段：
+- Arc bands: 四分之一圆环截面绕 Z 轴回转
+- 使用 OCP `BRepPrimAPI_MakeRevol`（CadQuery 的 `Workplane.revolve` 有 `Standard_OutOfRange` bug）
 
-**根因 (第二次修复 — 倒圆段缺失)**：仅 blade + endwall 两个直片融合，缺少倒圆 (fillet) 区域的过渡段。每个 band 实体应有 blade + fillet + endwall 三段结构。
+**第三次修复 — 厚向与直段错误 (最终版)**：
+- **厚向修正**: 内弧半径从 `r-t` 改为 `r+t`。外弧半径 r，内弧半径 r+t，同心（center=R+r, r）。内弧终点 (R-t, r) 和 (R+r, -t)，向叶片内侧/缘板下方加厚，与 blade/endwall 厚向一致
+- **Straight bands**: 截面放 band 起点 s0，沿 tangent 方向 Prism 拉伸 seg_len
+- **Transition bands**: 在 arc 边界处拆分为 straight + arc 子段，分别生成后 fuse
+- **自检验证**: 新增 `_validate_band_solids`，对每个 band 在 blade / fillet / endwall 三区域采样检测点是否在体内
 
-**修复**：新增 fillet 段实体：
-- Arc bands：四分之一圆环截面绕 Z 轴回转 (`_make_fillet_solid_arc`)
-- Straight bands：沿直线方向拉伸 (`_make_fillet_solid_straight`)
-- Blade 段 Z 范围从 [0, blade_height] 改为 [r, blade_height]，腾出空间给 fillet 段
+**CadQuery 可用曲面+加厚 API (已确认)**:
+- `Face.makeNSidedSurface(edges, points)` — N 边填充曲面
+- `Face.makeRuledSurface(e1, e2)` — 直纹面
+- `Face.thicken(thickness)` — 曲面加厚为实体
+  - 但 `makeNSidedSurface` 对复杂 3D 边界会失败 ("BRep_API: command not done")，因独立 `makeLine` 边不共享顶点
+  - `Face.thicken` 需要封闭壳输入，单面加厚返回非实体
 
 ---
 
@@ -52,10 +60,12 @@
 | `_make_surface_connector_wire` | 重构为调用新方法 | 代码复用 |
 | `_map_blade_s_to_expanded_length` | **新增方法** | 分段感知弧长映射 |
 | `build_ply_reference_curves` | 2 处替换 | `percent → segment-aware mapping` |
-| `build_ply_band_solids` | 重写 | 三段式 (blade+fillet+endwall) 融合 |
+| `build_ply_band_solids` | 重写 | 三段式 (blade+fillet+endwall) 融合, transition band 拆分 |
 | `_band_arc_angles_deg` | **新增方法** | band 弧长→角度转换 |
-| `_make_fillet_solid_arc` | **新增方法** | 四分之一圆环回转生成倒圆实体 |
-| `_make_fillet_solid_straight` | **新增方法** | 直线段倒圆实体 |
+| `_make_fillet_solid_arc` | **新增方法** | OCP BRepPrimAPI_MakeRevol 回转, 内弧半径 r+t |
+| `_make_fillet_solid_straight` | **新增方法** | BRepPrimAPI_MakePrism 沿切线拉伸 |
+| `_make_fillet_solid_transition` | **新增方法** | 拆分 strad/arc 子段后 fuse |
+| `_validate_band_solids` | **新增方法** | blade/fillet/endwall 三区域采样自检 |
 | `build_solids` | 新增 `ply_band_solids` 调用 | 集成铺层带实体 |
 | `export_step` | 新增 band solids 导出 | 每个 band 不同色相着色 |
 | `_hsv_to_rgb` | **新增方法** | 色相环颜色生成 |
@@ -144,21 +154,50 @@ ply_layer_thickness=1.0          # 铺层带可视化厚度
 
 ### 本项目的实现选择
 
-本项目采用 **分层构建策略**：
-- **Blade 层**：在 XY 平面创建外表面-内偏置之间的 2D 截面，沿 Z 向拉伸
-- **Endwall 层**：在 XY 平面创建 blade 曲线 → 倒圆末端 → 扩展曲线之间的 2D 截面，沿 -Z 拉伸
-- 两层在 z=0 处融合（fuse）
+采用 **三段分层构建 + 回转/拉伸** 策略：
+- **Blade 层** (z=r..blade_height)：XY 平面 2D 截面沿 +Z 拉伸 (同旧方案)
+- **Fillet 层** (z=0..r)：
+  - Arc bands: 四分之一圆环截面 (XZ 面) 用 `BRepPrimAPI_MakeRevol` 绕 Z 回转
+  - Straight bands: 同截面用 `BRepPrimAPI_MakePrism` 沿切线拉伸
+  - Transition bands: 拆分 straight+arc 子段各自生成
+  - 内弧半径 r+t > r，保证厚向与 blade/endwall 一致 (向叶片内侧/缘板下方)
+- **Endwall 层** (z=-thickness..0)：XY 平面 2D 截面沿 -Z 拉伸，边界含 endwall_start 折点
 
-这种方法避免了直接在 3D 中填充非平面曲面和曲面法向加厚的复杂性，
-同时保证了实体几何的有效性（CadQuery is Valid 验证通过）。
+Fillet 截面构建 (XZ 面):
+```
+外弧: center=(R+r, r), radius=r,  (R, r) → (R+r, 0)
+内弧: center=(R+r, r), radius=r+t, (R+r, -t) → (R-t, r)
+```
+两弧同心，内弧半径更大（r+t > r），从而实现向 blade 内侧 / endwall 下方的偏置。
 
 ## 6. 验证结果
 
 - **连接线-法向夹角**：直线段上 0.00e+00°（完美垂直）
 - **倒圆方向**：内凹（中点从 1.41r 修正到 0.59r）
 - **铺层带实体**：45/45 有效（CadQuery is Valid 验证通过）
+- **自检 (blade+fillet+endwall 三区采样)**：VALIDATION PASSED — all 45 bands OK
 
-## 7. 输出文件
+## 7. GitHub 仓库
+
+**仓库地址**: https://github.com/Mercury223/THFB-ply-model
+
+### 推送经验
+
+- **认证**: `gh auth login --with-token` (从 stdin 传入 token)
+- **推送**: 直接 `git push origin master` 即可，不需要任何 proxy 或特殊配置
+- **失败模式**: 不要用 `git config http.proxy` 设置代理 — 反而会导致连接失败
+- VPN 连接后直接推送，浏览器能打开 GitHub 就说明 git 也能推
+- 曾误判为网络问题反复尝试 proxy，实际是 push 已完成返回 "Everything up-to-date" 但被误读为超时
+
+### Commit 历史
+```
+abec853 docs: update history.md with fillet solid implementation details
+085f94f fix: use OCP BRepPrimAPI_MakeRevol for fillet solid generation
+81df6a6 feat: add fillet solid to ply band construction via revolve
+0ead9e0 fix: ply band solids side boundaries now follow surface connector path
+```
+
+## 8. 输出文件
 
 | 文件 | 说明 |
 |------|------|
@@ -169,7 +208,7 @@ ply_layer_thickness=1.0          # 铺层带可视化厚度
 | `ply_division_3d_view.png` | 3D 立体视图 |
 | `history.md` | 本文件 |
 
-## 8. 运行方式
+## 9. 运行方式
 
 ```bash
 # 完整运行（STEP + 可视化）
