@@ -88,6 +88,8 @@ class VaneBladeAndEndwallBuilder:
         "PCTest.m",
         "visualize_ply.py",
         "history.md",
+        ".git",
+        ".gitignore",
     }
 
     def __init__(self, p: Params):
@@ -1229,14 +1231,13 @@ class VaneBladeAndEndwallBuilder:
     def build_ply_band_solids(self, outer_profile):
         """为每个铺层带生成有厚度的可视化实体。
 
-        每段实体由四个边界曲线围成的区域加厚而成。
-        采用分层构建策略：
-          - blade 层 (z=r..blade_height)：叶身外表面向内加厚
-          - endwall 层 (z=-thickness..0)：缘板顶面向下加厚
-          - 两者在 z=0 处融合
+        每个 band 实体 = blade 段 + fillet 段 + endwall 段，三段融合：
+          - blade  层 (z=r .. blade_height)：叶身外表面向内偏置，沿 Z 拉伸
+          - fillet 层 (z=0 .. r)：倒圆四分之一圆环截面绕 Z 轴回转 (arc bands)
+                                   或沿直线方向拉伸 (straight bands)
+          - endwall 层 (z=-thickness .. 0)：缘板顶面 2D 截面沿 -Z 拉伸
 
-        左右边界采用 side_a / side_b 在 XY 面的投影路径
-        （包含 endwall_start 中间折点），而非简单的直线连接。
+        左右边界采用 side_a / side_b 在 XY 面的投影路径。
         """
         p = self.p
         thickness = float(p.ply_layer_thickness)
@@ -1249,6 +1250,14 @@ class VaneBladeAndEndwallBuilder:
         expanded_total = expanded_cum[-1]
         blade_height = float(p.blade_height)
         r = max(0.0, float(p.root_fillet_radius))
+
+        # 分段信息
+        total_len = self._outer_profile_total_length(outer_profile)
+        arc_start = p.blade_lower_length
+        arc_angle_rad = math.radians(
+            p.upper_tangent_angle_deg - p.lower_tangent_angle_deg)
+        arc_len = float(outer_profile["radius"]) * arc_angle_rad
+        arc_end = arc_start + arc_len
 
         solids = {}
         success = 0
@@ -1275,7 +1284,7 @@ class VaneBladeAndEndwallBuilder:
             q0 = self._interp_polyline_at_length(expanded_pts, expanded_cum, q0_len)
             q1 = self._interp_polyline_at_length(expanded_pts, expanded_cum, q1_len)
 
-            # 计算 endwall_start 点 (倒圆末端在缘板上的位置)
+            # endwall_start 点
             if r > 1e-9:
                 ew_start0 = cq.Vector(
                     root0.x + n0.x * r, root0.y + n0.y * r, 0.0)
@@ -1285,7 +1294,12 @@ class VaneBladeAndEndwallBuilder:
                 ew_start0 = root0
                 ew_start1 = root1
 
-            # ── Blade 部分: 叶身外表面向内偏置，z=0..blade_height ──
+            # ── 判断 band 所在分段类型 ──
+            on_arc = (s0 >= arc_start - 1e-9 and s1 <= arc_end + 1e-9)
+            on_lower_straight = (s1 <= arc_start + 1e-9)
+            on_upper_straight = (s0 >= arc_end - 1e-9)
+
+            # ── Blade 截面 (XY 面, s0→s1) ──
             n_pts = max(4, int((s1 - s0) * 4))
             outer_xy = []
             inner_xy = []
@@ -1300,6 +1314,7 @@ class VaneBladeAndEndwallBuilder:
                     0.0,
                 ))
 
+            # ── Build blade sub-solid (z=r .. blade_height) ──
             blade_edges = []
             for i in range(len(outer_xy) - 1):
                 blade_edges.append(
@@ -1315,13 +1330,27 @@ class VaneBladeAndEndwallBuilder:
             blade_solid = (
                 cq.Workplane("XY")
                 .add(blade_face)
-                .extrude(blade_height)
+                .extrude(blade_height - r)  # 从偏移起点到顶部
                 .val()
             )
+            if r > 1e-9:
+                blade_solid = blade_solid.translate(
+                    cq.Vector(0.0, 0.0, r))  # 抬高到 z=r
 
-            # ── Endwall 部分: 缘板顶面区域，z=0..-thickness ──
-            # 边界: blade curve → endwall_start → expanded curve (含 fillet 折点)
-            # 而非 blade curve → expanded curve (简单直线)
+            # ── Build fillet sub-solid (z=0 .. r) ──
+            if r > 1e-9:
+                if on_arc:
+                    fillet_solid = self._make_fillet_solid_arc(
+                        float(outer_profile["radius"]), r, thickness,
+                        s0, s1)
+                else:
+                    fillet_solid = self._make_fillet_solid_straight(
+                        float(outer_profile["radius"]), r, thickness,
+                        s0, s1, outer_profile)
+            else:
+                fillet_solid = None
+
+            # ── Build endwall sub-solid (z=-thickness .. 0) ──
             exp_bottom_n = max(4, int(abs(q1_len - q0_len) * 0.3))
             exp_seg_xy = []
             for i in range(exp_bottom_n + 1):
@@ -1331,20 +1360,16 @@ class VaneBladeAndEndwallBuilder:
                 exp_seg_xy.append(pt)
 
             endwall_edges = []
-            # blade 曲线正向 (outer[0] → outer[-1])
             for i in range(len(outer_xy) - 1):
                 endwall_edges.append(
                     cq.Edge.makeLine(outer_xy[i], outer_xy[i + 1]))
-            # side_b 路径: outer[-1] → ew_start1 → q1
             endwall_edges.append(
                 cq.Edge.makeLine(outer_xy[-1], ew_start1))
             endwall_edges.append(
                 cq.Edge.makeLine(ew_start1, exp_seg_xy[-1]))
-            # expanded 曲线反向 (exp[-1] → exp[0])
             for i in range(len(exp_seg_xy) - 1, 0, -1):
                 endwall_edges.append(
                     cq.Edge.makeLine(exp_seg_xy[i], exp_seg_xy[i - 1]))
-            # side_a 路径: q0 → ew_start0 → outer[0]
             endwall_edges.append(
                 cq.Edge.makeLine(exp_seg_xy[0], ew_start0))
             endwall_edges.append(
@@ -1359,7 +1384,12 @@ class VaneBladeAndEndwallBuilder:
                     .extrude(-thickness)
                     .val()
                 )
-                band_solid = blade_solid.fuse(endwall_solid)
+                # 融合三段
+                band_solid = blade_solid
+                if fillet_solid is not None:
+                    band_solid = band_solid.fuse(fillet_solid)
+                band_solid = band_solid.fuse(endwall_solid)
+
                 if not band_solid.isValid():
                     raise RuntimeError("Fused solid not valid")
             except Exception as e:
@@ -1373,6 +1403,92 @@ class VaneBladeAndEndwallBuilder:
         print(f"[铺层带实体] {success}/{len(stations) - 1} bands generated"
               + (f", {failed} failed" if failed else ""))
         return solids
+
+    # ── Fillet solid helpers ──
+
+    def _band_arc_angles_deg(self, s0, s1):
+        """返回 band [s0, s1] 在圆弧段上对应的起止角度 (度)."""
+        p = self.p
+        lower_len = p.blade_lower_length
+        arc_angle_span = p.upper_tangent_angle_deg - p.lower_tangent_angle_deg
+        arc_len = p.outer_radius * math.radians(arc_angle_span)
+
+        s_arc0 = s0 - lower_len
+        s_arc1 = s1 - lower_len
+        θ0 = p.lower_tangent_angle_deg + (s_arc0 / arc_len) * arc_angle_span
+        θ1 = p.lower_tangent_angle_deg + (s_arc1 / arc_len) * arc_angle_span
+        return θ0, θ1
+
+    def _make_fillet_solid_arc(self, R, r, thickness, s0, s1):
+        """Arc bands: 四分之一圆环截面绕 Z 轴回转生成倒圆实体."""
+        import math as _math
+        sqrt2 = _math.sqrt(2.0)
+        t = float(thickness)
+
+        θ0, θ1 = self._band_arc_angles_deg(s0, s1)
+        span = θ1 - θ0
+        if span < 0.01:
+            return None
+
+        profile = (
+            cq.Workplane("XZ")
+            .moveTo(R, r)
+            .threePointArc(
+                (R + r - r / sqrt2, r - r / sqrt2),
+                (R + r, 0.0))
+            .lineTo(R + r, t)
+            .threePointArc(
+                (R + r - (r - t) / sqrt2, r - (r - t) / sqrt2),
+                (R + t, r))
+            .close()
+        )
+
+        try:
+            solid = profile.revolve(span, (0, 0, 0), (0, 0, 1)).val()
+            if _math.fabs(θ0) > 1e-9:
+                solid = solid.rotate((0, 0, 0), (0, 0, 1), θ0)
+        except Exception:
+            return None
+
+        return solid
+
+    def _make_fillet_solid_straight(self, R, r, thickness, s0, s1, outer_profile):
+        """Straight bands: quarter-cylinder along straight blade direction."""
+        t = float(thickness)
+        sm = 0.5 * (s0 + s1)
+        _, tangent, normal = self._outer_profile_point_tangent_normal_at_s(
+            outer_profile, sm)
+        seg_len = s1 - s0
+
+        # 在 XY 面构建矩形 face, 代表倒圆截面的近似
+        # 沿法向宽 = r+thickness, 沿切线长 = seg_len
+        rect_w = r + t
+        rect_h = seg_len
+        root_m, _, _ = self._outer_profile_point_tangent_normal_at_s(
+            outer_profile, sm)
+
+        center_x = root_m.x + normal.x * (R + rect_w * 0.5 - R + r * 0.5)
+        center_y = root_m.y + normal.y * (R + rect_w * 0.5 - R + r * 0.5)
+        # 简化: 使用 endwall_start 位置
+        ew_center = cq.Vector(
+            root_m.x + normal.x * (R + r * 0.5 + t * 0.5),
+            root_m.y + normal.y * (R + r * 0.5 + t * 0.5),
+            r * 0.5)
+
+        try:
+            bar = (
+                cq.Workplane("XY")
+                .transformed(offset=ew_center)
+                .box(r + t, seg_len, r, centered=True)
+                .val()
+            )
+            angle = math.degrees(math.atan2(tangent.y, tangent.x))
+            if abs(angle) > 1e-9:
+                bar = bar.rotate((0, 0, 0), (0, 0, 1), angle)
+        except Exception:
+            return None
+
+        return bar
 
     def _thicken_face_to_solid(self, face, thickness):
         """将曲面沿法向加厚为实体。
