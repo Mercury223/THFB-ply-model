@@ -26,9 +26,16 @@
 
 ### 1.3 铺层带实体加厚边界错误 (2026-05-09)
 
-**根因**：`build_ply_band_solids` 中 endwall 面的左右边界使用 blade 曲线端点直接连到 expanded 曲线端点（单一直线段），未经过倒圆末端点 `endwall_start`。
+**根因 (第一次修复)**：`build_ply_band_solids` 中 endwall 面的左右边界使用 blade 曲线端点直接连到 expanded 曲线端点（单一直线段），未经过倒圆末端点 `endwall_start`。
 
-**修复**：endwall 面的左右边界改为 blade_curve → endwall_start → expanded_curve 两段式路径，与 `_make_surface_connector_wire` 中的 side_a / side_b 路径保持一致。
+**修复**：endwall 面的左右边界改为 blade_curve → endwall_start → expanded_curve 两段式路径。
+
+**根因 (第二次修复 — 倒圆段缺失)**：仅 blade + endwall 两个直片融合，缺少倒圆 (fillet) 区域的过渡段。每个 band 实体应有 blade + fillet + endwall 三段结构。
+
+**修复**：新增 fillet 段实体：
+- Arc bands：四分之一圆环截面绕 Z 轴回转 (`_make_fillet_solid_arc`)
+- Straight bands：沿直线方向拉伸 (`_make_fillet_solid_straight`)
+- Blade 段 Z 范围从 [0, blade_height] 改为 [r, blade_height]，腾出空间给 fillet 段
 
 ---
 
@@ -45,7 +52,10 @@
 | `_make_surface_connector_wire` | 重构为调用新方法 | 代码复用 |
 | `_map_blade_s_to_expanded_length` | **新增方法** | 分段感知弧长映射 |
 | `build_ply_reference_curves` | 2 处替换 | `percent → segment-aware mapping` |
-| `build_ply_band_solids` | 重写 | endwall 边界增加 endwall_start 折点 |
+| `build_ply_band_solids` | 重写 | 三段式 (blade+fillet+endwall) 融合 |
+| `_band_arc_angles_deg` | **新增方法** | band 弧长→角度转换 |
+| `_make_fillet_solid_arc` | **新增方法** | 四分之一圆环回转生成倒圆实体 |
+| `_make_fillet_solid_straight` | **新增方法** | 直线段倒圆实体 |
 | `build_solids` | 新增 `ply_band_solids` 调用 | 集成铺层带实体 |
 | `export_step` | 新增 band solids 导出 | 每个 band 不同色相着色 |
 | `_hsv_to_rgb` | **新增方法** | 色相环颜色生成 |
