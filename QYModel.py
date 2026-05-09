@@ -1420,8 +1420,14 @@ class VaneBladeAndEndwallBuilder:
         return θ0, θ1
 
     def _make_fillet_solid_arc(self, R, r, thickness, s0, s1):
-        """Arc bands: 四分之一圆环截面绕 Z 轴回转生成倒圆实体."""
+        """Arc bands: 四分之一圆环截面绕 Z 轴回转生成倒圆实体.
+
+        使用 OCP BRepPrimAPI_MakeRevol (CadQuery 的 revolve 有 bug).
+        """
         import math as _math
+        from OCP.BRepPrimAPI import BRepPrimAPI_MakeRevol
+        from OCP.gp import gp_Ax1, gp_Pnt, gp_Dir
+
         sqrt2 = _math.sqrt(2.0)
         t = float(thickness)
 
@@ -1430,7 +1436,7 @@ class VaneBladeAndEndwallBuilder:
         if span < 0.01:
             return None
 
-        profile = (
+        profile_wp = (
             cq.Workplane("XZ")
             .moveTo(R, r)
             .threePointArc(
@@ -1444,11 +1450,17 @@ class VaneBladeAndEndwallBuilder:
         )
 
         try:
-            solid = profile.revolve(span, (0, 0, 0), (0, 0, 1)).val()
-            if _math.fabs(θ0) > 1e-9:
-                solid = solid.rotate((0, 0, 0), (0, 0, 1), θ0)
+            face = cq.Face.makeFromWires(profile_wp.val())
         except Exception:
             return None
+
+        axis = gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1))
+        revol = BRepPrimAPI_MakeRevol(face.wrapped, axis, _math.radians(span))
+        revol.Build()
+        solid = cq.Solid(revol.Shape())
+
+        if _math.fabs(θ0) > 1e-9:
+            solid = solid.rotate((0, 0, 0), (0, 0, 1), θ0)
 
         return solid
 
