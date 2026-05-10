@@ -6,11 +6,6 @@ from pathlib import Path
 import cadquery as cq
 from cadquery import exporters
 
-from OCP.GeomAPI import GeomAPI_PointsToBSpline
-from OCP.TColgp import TColgp_Array1OfPnt
-from OCP.gp import gp_Pnt
-from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeEdge
-
 
 @dataclass
 class Params:
@@ -79,9 +74,6 @@ class Params:
 
     # 铺层带厚度，用于生成可视化铺层实体（0 表示不生成）
     ply_layer_thickness: float = 1.0
-
-    # 使用 B 样条曲线（True）还是折线（False）生成参考线和翻折路径
-    ply_use_splines: bool = True
 
     # 输出
     out_dir: str = "."
@@ -1020,28 +1012,16 @@ class VaneBladeAndEndwallBuilder:
 
         return self.make_wire(edges)
 
-    def _make_spline_wire(self, pts):
-        """用 B 样条插值点生成光滑曲线 wire。"""
-        clean = []
-        for pt in pts:
-            if not clean:
-                clean.append(pt)
-                continue
-            if (abs(pt.x - clean[-1].x) > 1e-9
-                or abs(pt.y - clean[-1].y) > 1e-9
-                or abs(pt.z - clean[-1].z) > 1e-9):
-                clean.append(pt)
-
-        if len(clean) < 2:
-            raise ValueError("至少需要两个不同点才能生成样条")
-
-        arr = TColgp_Array1OfPnt(1, len(clean))
-        for i, p in enumerate(clean):
-            arr.SetValue(i + 1, gp_Pnt(p.x, p.y, p.z))
-        curve = GeomAPI_PointsToBSpline(arr).Curve()
-        topo_edge = BRepBuilderAPI_MakeEdge(curve).Edge()
-        edge = cq.Edge(topo_edge)
-        return cq.Wire.assembleEdges([edge])
+    @staticmethod
+    def _make_circular_arc_edge(cx, cy, radius, angle_start_deg, angle_end_deg):
+        """在 XY 平面上创建真实圆弧边（非折线逼近）。"""
+        a0 = math.radians(angle_start_deg)
+        a1 = math.radians(angle_end_deg)
+        p0 = cq.Vector(cx + radius * math.cos(a0), cy + radius * math.sin(a0), 0.0)
+        p1 = cq.Vector(cx + radius * math.cos(a1), cy + radius * math.sin(a1), 0.0)
+        am = 0.5 * (a0 + a1)
+        pm = cq.Vector(cx + radius * math.cos(am), cy + radius * math.sin(am), 0.0)
+        return cq.Edge.makeThreePointArc(p0, pm, p1)
 
     def _make_profile_segment_wire(self, outer_profile, s0, s1, z, sample_count=8):
         """
@@ -1061,8 +1041,6 @@ class VaneBladeAndEndwallBuilder:
             )
             pts.append(self._v3(q, z))
 
-        if self.p.ply_use_splines:
-            return self._make_spline_wire(pts)
         return self._make_edge_polyline(pts)
 
     def _make_expanded_segment_wire(self, q0, q1, z=0.0):
@@ -1115,8 +1093,6 @@ class VaneBladeAndEndwallBuilder:
     def _make_surface_connector_wire(self, root_xy, end_xy, normal_xy):
         """从叶身外表面翻折到缘板 z=0 平面的参考线 (Wire)。"""
         pts = self._connector_polyline_pts(root_xy, end_xy, normal_xy)
-        if self.p.ply_use_splines:
-            return self._make_spline_wire(pts)
         return self._make_edge_polyline(pts)
 
     def build_ply_reference_curves(self, outer_profile):
@@ -1287,30 +1263,65 @@ class VaneBladeAndEndwallBuilder:
             on_upper_straight = (s0 >= arc_end - 1e-9)
 
             # ── Blade 截面 (XY 面, s0→s1) ──
-            n_pts = max(4, int((s1 - s0) * 4))
-            outer_xy = []
-            inner_xy = []
-            for i in range(n_pts + 1):
-                s = s0 + (s1 - s0) * i / n_pts
-                pt, _, normal = self._outer_profile_point_tangent_normal_at_s(
-                    outer_profile, s)
-                outer_xy.append(pt)
-                inner_xy.append(cq.Vector(
-                    pt.x - normal.x * thickness,
-                    pt.y - normal.y * thickness,
-                    0.0,
-                ))
+            if on_arc:
+                # 圆弧段：用真实圆弧边，避免折线分段表面
+                Rblade = float(outer_profile["radius"])
+                θ0, θ1 = self._band_arc_angles_deg(s0, s1)
+                a0r, a1r = math.radians(θ0), math.radians(θ1)
+
+                blade_outer_arc = self._make_circular_arc_edge(
+                    0, 0, Rblade, θ0, θ1)
+                blade_inner_arc = self._make_circular_arc_edge(
+                    0, 0, Rblade - thickness, θ1, θ0)
+
+                bp_start = cq.Vector(
+                    Rblade * math.cos(a0r), Rblade * math.sin(a0r), 0.0)
+                bp_end = cq.Vector(
+                    Rblade * math.cos(a1r), Rblade * math.sin(a1r), 0.0)
+                ip_start = cq.Vector(
+                    (Rblade - thickness) * math.cos(a0r),
+                    (Rblade - thickness) * math.sin(a0r), 0.0)
+                ip_end = cq.Vector(
+                    (Rblade - thickness) * math.cos(a1r),
+                    (Rblade - thickness) * math.sin(a1r), 0.0)
+
+                blade_edges = [
+                    blade_outer_arc,
+                    cq.Edge.makeLine(bp_end, ip_end),
+                    blade_inner_arc,
+                    cq.Edge.makeLine(ip_start, bp_start),
+                ]
+            else:
+                # 直线段/过渡段：折线采样
+                n_pts = max(4, int((s1 - s0) * 4))
+                outer_xy = []
+                inner_xy = []
+                for i in range(n_pts + 1):
+                    s = s0 + (s1 - s0) * i / n_pts
+                    pt, _, normal = self._outer_profile_point_tangent_normal_at_s(
+                        outer_profile, s)
+                    outer_xy.append(pt)
+                    inner_xy.append(cq.Vector(
+                        pt.x - normal.x * thickness,
+                        pt.y - normal.y * thickness,
+                        0.0,
+                    ))
+                bp_start = outer_xy[0]
+                bp_end = outer_xy[-1]
+                ip_start = inner_xy[0]
+                ip_end = inner_xy[-1]
+
+                blade_edges = []
+                for i in range(len(outer_xy) - 1):
+                    blade_edges.append(
+                        cq.Edge.makeLine(outer_xy[i], outer_xy[i + 1]))
+                for i in range(len(inner_xy) - 1, 0, -1):
+                    blade_edges.append(
+                        cq.Edge.makeLine(inner_xy[i], inner_xy[i - 1]))
+                blade_edges.append(cq.Edge.makeLine(bp_start, ip_start))
+                blade_edges.append(cq.Edge.makeLine(ip_end, bp_end))
 
             # ── Build blade sub-solid (z=r .. blade_height) ──
-            blade_edges = []
-            for i in range(len(outer_xy) - 1):
-                blade_edges.append(
-                    cq.Edge.makeLine(outer_xy[i], outer_xy[i + 1]))
-            for i in range(len(inner_xy) - 1, 0, -1):
-                blade_edges.append(
-                    cq.Edge.makeLine(inner_xy[i], inner_xy[i - 1]))
-            blade_edges.append(cq.Edge.makeLine(outer_xy[0], inner_xy[0]))
-            blade_edges.append(cq.Edge.makeLine(inner_xy[-1], outer_xy[-1]))
 
             blade_wire = cq.Wire.assembleEdges(blade_edges)
             blade_face = cq.Face.makeFromWires(blade_wire)
@@ -1344,29 +1355,56 @@ class VaneBladeAndEndwallBuilder:
                 fillet_solid = None
 
             # ── Build endwall sub-solid (z=-thickness .. 0) ──
-            exp_bottom_n = max(4, int(abs(expanded_s1 - expanded_s0) * 0.3))
-            exp_seg_xy = []
-            for i in range(exp_bottom_n + 1):
-                t = expanded_s0 if exp_bottom_n == 0 else (
-                    expanded_s0 + (expanded_s1 - expanded_s0) * i / exp_bottom_n)
-                pt = self._interp_polyline_at_length(expanded_pts, expanded_cum, t)
-                exp_seg_xy.append(pt)
+            if on_arc:
+                # 圆弧段：用真实圆弧边构建端壁轮廓
+                offset = float(p.ply_expand_offset)
+                Rblade = float(outer_profile["radius"])
+                a0r = math.radians(θ0)
+                a1r = math.radians(θ1)
 
-            endwall_edges = []
-            for i in range(len(outer_xy) - 1):
+                q0 = cq.Vector(
+                    (Rblade + offset) * math.cos(a0r),
+                    (Rblade + offset) * math.sin(a0r), 0.0)
+                q1 = cq.Vector(
+                    (Rblade + offset) * math.cos(a1r),
+                    (Rblade + offset) * math.sin(a1r), 0.0)
+
+                expanded_arc = self._make_circular_arc_edge(
+                    0, 0, Rblade + offset, θ1, θ0)
+
+                endwall_edges = [
+                    blade_outer_arc,
+                    cq.Edge.makeLine(bp_end, ew_start1),
+                    cq.Edge.makeLine(ew_start1, q1),
+                    expanded_arc,
+                    cq.Edge.makeLine(q0, ew_start0),
+                    cq.Edge.makeLine(ew_start0, bp_start),
+                ]
+            else:
+                # 直线段/过渡段：折线采样
+                exp_bottom_n = max(4, int(abs(expanded_s1 - expanded_s0) * 0.3))
+                exp_seg_xy = []
+                for i in range(exp_bottom_n + 1):
+                    t = expanded_s0 if exp_bottom_n == 0 else (
+                        expanded_s0 + (expanded_s1 - expanded_s0) * i / exp_bottom_n)
+                    pt = self._interp_polyline_at_length(expanded_pts, expanded_cum, t)
+                    exp_seg_xy.append(pt)
+
+                endwall_edges = []
+                for i in range(len(outer_xy) - 1):
+                    endwall_edges.append(
+                        cq.Edge.makeLine(outer_xy[i], outer_xy[i + 1]))
                 endwall_edges.append(
-                    cq.Edge.makeLine(outer_xy[i], outer_xy[i + 1]))
-            endwall_edges.append(
-                cq.Edge.makeLine(outer_xy[-1], ew_start1))
-            endwall_edges.append(
-                cq.Edge.makeLine(ew_start1, exp_seg_xy[-1]))
-            for i in range(len(exp_seg_xy) - 1, 0, -1):
+                    cq.Edge.makeLine(outer_xy[-1], ew_start1))
                 endwall_edges.append(
-                    cq.Edge.makeLine(exp_seg_xy[i], exp_seg_xy[i - 1]))
-            endwall_edges.append(
-                cq.Edge.makeLine(exp_seg_xy[0], ew_start0))
-            endwall_edges.append(
-                cq.Edge.makeLine(ew_start0, outer_xy[0]))
+                    cq.Edge.makeLine(ew_start1, exp_seg_xy[-1]))
+                for i in range(len(exp_seg_xy) - 1, 0, -1):
+                    endwall_edges.append(
+                        cq.Edge.makeLine(exp_seg_xy[i], exp_seg_xy[i - 1]))
+                endwall_edges.append(
+                    cq.Edge.makeLine(exp_seg_xy[0], ew_start0))
+                endwall_edges.append(
+                    cq.Edge.makeLine(ew_start0, outer_xy[0]))
 
             try:
                 endwall_wire = cq.Wire.assembleEdges(endwall_edges)
@@ -1847,7 +1885,6 @@ class VaneBladeAndEndwallBuilder:
         print(f"  ply_expand_offset        = {self.p.ply_expand_offset}")
         print(f"  ply_expand_samples       = {self.p.ply_expand_samples}")
         print(f"  ply_fillet_samples       = {self.p.ply_fillet_samples}")
-        print(f"  ply_use_splines          = {self.p.ply_use_splines}")
         print(f"  step_name                = {self.p.step_name}")
         print("=" * 80)
 
@@ -1899,9 +1936,6 @@ def main():
 
         # 铺层带可视化厚度
         ply_layer_thickness=1.0,
-
-        # B 样条曲线（True）vs 折线（False）
-        ply_use_splines=True,
 
         # 输出
         out_dir=str(current_dir),
