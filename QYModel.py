@@ -1480,11 +1480,10 @@ class VaneBladeAndEndwallBuilder:
                     fb_as = cq.Vector(pt_as.x + n_as.x * r,
                                       pt_as.y + n_as.y * r, 0.0)
 
-                    # 直线段端点 (outer at R+offset)
-                    exp_as_len = self._map_blade_s_to_expanded_length(
-                        outer_profile, arc_start)
-                    eq_as = self._interp_polyline_at_length(
-                        expanded_pts, expanded_cum, exp_as_len)
+                    # 直线段端点 (outer at R+offset) — 用几何精确位置
+                    eq_as = cq.Vector(
+                        (Rblade + offset) * math.cos(a_low_r),
+                        (Rblade + offset) * math.sin(a_low_r), 0.0)
 
                     fb_s1 = cq.Vector((Rblade + r) * math.cos(a_s1_r),
                                       (Rblade + r) * math.sin(a_s1_r), 0.0)
@@ -1521,11 +1520,10 @@ class VaneBladeAndEndwallBuilder:
                     fb_s1 = cq.Vector(pt_s1.x + n_s1.x * r,
                                       pt_s1.y + n_s1.y * r, 0.0)
 
-                    # 直线段端点 (outer at R+offset)
-                    exp_ae_len = self._map_blade_s_to_expanded_length(
-                        outer_profile, arc_end)
-                    eq_ae = self._interp_polyline_at_length(
-                        expanded_pts, expanded_cum, exp_ae_len)
+                    # 直线段端点 (outer at R+offset) — 用几何精确位置
+                    eq_ae = cq.Vector(
+                        (Rblade + offset) * math.cos(a_up_r),
+                        (Rblade + offset) * math.sin(a_up_r), 0.0)
 
                     fb_s0 = cq.Vector((Rblade + r) * math.cos(a_s0_r),
                                       (Rblade + r) * math.sin(a_s0_r), 0.0)
@@ -1550,21 +1548,16 @@ class VaneBladeAndEndwallBuilder:
                     pt = self._interp_polyline_at_length(expanded_pts, expanded_cum, t)
                     exp_seg_xy.append(pt)
 
-                endwall_edges = []
-                for i in range(len(outer_xy) - 1):
-                    endwall_edges.append(
-                        cq.Edge.makeLine(outer_xy[i], outer_xy[i + 1]))
-                endwall_edges.append(
-                    cq.Edge.makeLine(outer_xy[-1], ew_start1))
-                endwall_edges.append(
-                    cq.Edge.makeLine(ew_start1, exp_seg_xy[-1]))
+                # 直线段端壁轮廓：从 ew_start (R+r) 开始
+                endwall_edges = [
+                    cq.Edge.makeLine(ew_start0, ew_start1),
+                    cq.Edge.makeLine(ew_start1, exp_seg_xy[-1]),
+                ]
                 for i in range(len(exp_seg_xy) - 1, 0, -1):
                     endwall_edges.append(
                         cq.Edge.makeLine(exp_seg_xy[i], exp_seg_xy[i - 1]))
                 endwall_edges.append(
                     cq.Edge.makeLine(exp_seg_xy[0], ew_start0))
-                endwall_edges.append(
-                    cq.Edge.makeLine(ew_start0, outer_xy[0]))
 
             try:
                 endwall_wire = cq.Wire.assembleEdges(endwall_edges)
