@@ -54,7 +54,7 @@ class Params:
     make_ply_curves: bool = True
 
     # 当相邻剪口点的切线方向累计偏差达到该角度时，认为需要剪口/分段
-    ply_tangent_angle_step_deg: float = 5.0
+    ply_tangent_angle_step_deg: float = 20.0
 
     # 扩展曲线相对叶身外侧曲线的外法向偏置距离。
     # 应大于缘板局部覆盖范围。
@@ -984,29 +984,6 @@ class VaneBladeAndEndwallBuilder:
             0.0,
         )
 
-    @staticmethod
-    def _clamped_interval(center, length, total):
-        """
-        在 [0, total] 内，以 center 为中心取 length 长度。
-        若越界，则整体平移回来。
-        """
-        length = min(float(length), float(total))
-        a = center - 0.5 * length
-        b = center + 0.5 * length
-
-        if a < 0.0:
-            b -= a
-            a = 0.0
-
-        if b > total:
-            a -= b - total
-            b = total
-
-        a = max(0.0, a)
-        b = min(total, b)
-
-        return a, b
-
     def _make_edge_polyline(self, pts):
         """
         用多段直线生成 wire。比 makeSpline 更稳，STEP 下游软件也更容易识别。
@@ -1160,33 +1137,16 @@ class VaneBladeAndEndwallBuilder:
                 normal_xy=normal_xy,
             )
 
-        # 2) 对每个分段，在扩展曲线中间截取与叶身段相同弧长的一段
+        # 2) 对每个分段，在扩展曲线上截取对应弧长段（直接映射端点）
         for idx in range(len(stations) - 1):
             s0 = stations[idx]
             s1 = stations[idx + 1]
-            blade_seg_len = s1 - s0
 
-            expanded_center_len = self._map_blade_s_to_expanded_length(
-                outer_profile,
-                0.5 * (s0 + s1),
-            )
+            expanded_s0 = self._map_blade_s_to_expanded_length(outer_profile, s0)
+            expanded_s1 = self._map_blade_s_to_expanded_length(outer_profile, s1)
 
-            q0_len, q1_len = self._clamped_interval(
-                center=expanded_center_len,
-                length=blade_seg_len,
-                total=expanded_total,
-            )
-
-            q0 = self._interp_polyline_at_length(
-                expanded_pts,
-                expanded_cum,
-                q0_len,
-            )
-            q1 = self._interp_polyline_at_length(
-                expanded_pts,
-                expanded_cum,
-                q1_len,
-            )
+            q0 = self._interp_polyline_at_length(expanded_pts, expanded_cum, expanded_s0)
+            q1 = self._interp_polyline_at_length(expanded_pts, expanded_cum, expanded_s1)
 
             curves[f"ply_band_{idx:04d}_blade_equal_arc"] = (
                 self._make_profile_segment_wire(
@@ -1247,12 +1207,10 @@ class VaneBladeAndEndwallBuilder:
 
         stations = self._make_ply_station_s_values(outer_profile)
         expanded_pts, expanded_cum = self._make_expanded_polyline(outer_profile)
-        expanded_total = expanded_cum[-1]
         blade_height = float(p.blade_height)
         r = max(0.0, float(p.root_fillet_radius))
 
         # 分段信息
-        total_len = self._outer_profile_total_length(outer_profile)
         arc_start = p.blade_lower_length
         arc_angle_rad = math.radians(
             p.upper_tangent_angle_deg - p.lower_tangent_angle_deg)
@@ -1266,23 +1224,17 @@ class VaneBladeAndEndwallBuilder:
         for idx in range(len(stations) - 1):
             s0 = stations[idx]
             s1 = stations[idx + 1]
-            blade_seg_len = s1 - s0
 
             root0, _, n0 = self._outer_profile_point_tangent_normal_at_s(
                 outer_profile, s0)
             root1, _, n1 = self._outer_profile_point_tangent_normal_at_s(
                 outer_profile, s1)
 
-            # 扩展曲线上居中等弧长段端点
-            expanded_center_len = self._map_blade_s_to_expanded_length(
-                outer_profile, 0.5 * (s0 + s1))
-            q0_len, q1_len = self._clamped_interval(
-                center=expanded_center_len,
-                length=blade_seg_len,
-                total=expanded_total,
-            )
-            q0 = self._interp_polyline_at_length(expanded_pts, expanded_cum, q0_len)
-            q1 = self._interp_polyline_at_length(expanded_pts, expanded_cum, q1_len)
+            # 扩展曲线上对应端点（直接映射，保证与 surface connector 对齐）
+            expanded_s0 = self._map_blade_s_to_expanded_length(outer_profile, s0)
+            expanded_s1 = self._map_blade_s_to_expanded_length(outer_profile, s1)
+            q0 = self._interp_polyline_at_length(expanded_pts, expanded_cum, expanded_s0)
+            q1 = self._interp_polyline_at_length(expanded_pts, expanded_cum, expanded_s1)
 
             # endwall_start 点
             if r > 1e-9:
@@ -1357,11 +1309,11 @@ class VaneBladeAndEndwallBuilder:
                 fillet_solid = None
 
             # ── Build endwall sub-solid (z=-thickness .. 0) ──
-            exp_bottom_n = max(4, int(abs(q1_len - q0_len) * 0.3))
+            exp_bottom_n = max(4, int(abs(expanded_s1 - expanded_s0) * 0.3))
             exp_seg_xy = []
             for i in range(exp_bottom_n + 1):
-                t = q0_len if exp_bottom_n == 0 else (
-                    q0_len + (q1_len - q0_len) * i / exp_bottom_n)
+                t = expanded_s0 if exp_bottom_n == 0 else (
+                    expanded_s0 + (expanded_s1 - expanded_s0) * i / exp_bottom_n)
                 pt = self._interp_polyline_at_length(expanded_pts, expanded_cum, t)
                 exp_seg_xy.append(pt)
 
@@ -1900,7 +1852,7 @@ def main():
 
         # 铺层划分参考线
         make_ply_curves=True,
-        ply_tangent_angle_step_deg=5.0,
+        ply_tangent_angle_step_deg=20.0,
         ply_expand_offset=60.0,
         ply_expand_samples=1200,
         ply_fillet_samples=12,
