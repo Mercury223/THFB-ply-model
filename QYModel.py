@@ -6,6 +6,11 @@ from pathlib import Path
 import cadquery as cq
 from cadquery import exporters
 
+from OCP.GeomAPI import GeomAPI_PointsToBSpline
+from OCP.TColgp import TColgp_Array1OfPnt
+from OCP.gp import gp_Pnt
+from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeEdge
+
 
 @dataclass
 class Params:
@@ -74,6 +79,9 @@ class Params:
 
     # 铺层带厚度，用于生成可视化铺层实体（0 表示不生成）
     ply_layer_thickness: float = 1.0
+
+    # 使用 B 样条曲线（True）还是折线（False）生成参考线和翻折路径
+    ply_use_splines: bool = True
 
     # 输出
     out_dir: str = "."
@@ -1012,6 +1020,29 @@ class VaneBladeAndEndwallBuilder:
 
         return self.make_wire(edges)
 
+    def _make_spline_wire(self, pts):
+        """用 B 样条插值点生成光滑曲线 wire。"""
+        clean = []
+        for pt in pts:
+            if not clean:
+                clean.append(pt)
+                continue
+            if (abs(pt.x - clean[-1].x) > 1e-9
+                or abs(pt.y - clean[-1].y) > 1e-9
+                or abs(pt.z - clean[-1].z) > 1e-9):
+                clean.append(pt)
+
+        if len(clean) < 2:
+            raise ValueError("至少需要两个不同点才能生成样条")
+
+        arr = TColgp_Array1OfPnt(1, len(clean))
+        for i, p in enumerate(clean):
+            arr.SetValue(i + 1, gp_Pnt(p.x, p.y, p.z))
+        curve = GeomAPI_PointsToBSpline(arr).Curve()
+        topo_edge = BRepBuilderAPI_MakeEdge(curve).Edge()
+        edge = cq.Edge(topo_edge)
+        return cq.Wire.assembleEdges([edge])
+
     def _make_profile_segment_wire(self, outer_profile, s0, s1, z, sample_count=8):
         """
         叶身外侧曲线上的一小段，用于显示每条铺层带在叶身侧的等弧长段。
@@ -1030,6 +1061,8 @@ class VaneBladeAndEndwallBuilder:
             )
             pts.append(self._v3(q, z))
 
+        if self.p.ply_use_splines:
+            return self._make_spline_wire(pts)
         return self._make_edge_polyline(pts)
 
     def _make_expanded_segment_wire(self, q0, q1, z=0.0):
@@ -1082,6 +1115,8 @@ class VaneBladeAndEndwallBuilder:
     def _make_surface_connector_wire(self, root_xy, end_xy, normal_xy):
         """从叶身外表面翻折到缘板 z=0 平面的参考线 (Wire)。"""
         pts = self._connector_polyline_pts(root_xy, end_xy, normal_xy)
+        if self.p.ply_use_splines:
+            return self._make_spline_wire(pts)
         return self._make_edge_polyline(pts)
 
     def build_ply_reference_curves(self, outer_profile):
@@ -1812,6 +1847,7 @@ class VaneBladeAndEndwallBuilder:
         print(f"  ply_expand_offset        = {self.p.ply_expand_offset}")
         print(f"  ply_expand_samples       = {self.p.ply_expand_samples}")
         print(f"  ply_fillet_samples       = {self.p.ply_fillet_samples}")
+        print(f"  ply_use_splines          = {self.p.ply_use_splines}")
         print(f"  step_name                = {self.p.step_name}")
         print("=" * 80)
 
@@ -1863,6 +1899,9 @@ def main():
 
         # 铺层带可视化厚度
         ply_layer_thickness=1.0,
+
+        # B 样条曲线（True）vs 折线（False）
+        ply_use_splines=True,
 
         # 输出
         out_dir=str(current_dir),
