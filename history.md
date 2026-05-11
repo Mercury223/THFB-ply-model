@@ -184,8 +184,9 @@ Fillet 截面构建 (XZ 面):
 ### 推送经验
 
 - **认证**: `gh auth login --with-token` (从 stdin 传入 token)
-- **推送**: 直接 `git push origin master` 即可，不需要任何 proxy 或特殊配置
+- **推送**: 先配置代理 `git config --global http.proxy 127.0.0.1:7897` 和 `https.proxy`，再 `git push origin master`
 - **失败模式**: 不要用 `git config http.proxy` 设置代理 — 反而会导致连接失败
+- **SSH 备用**: 若 HTTPS 不通，可 `ssh-keygen -t ed25519` → `gh ssh-key add` → `git remote set-url origin git@github.com:...`
 - VPN 连接后直接推送，浏览器能打开 GitHub 就说明 git 也能推
 - 曾误判为网络问题反复尝试 proxy，实际是 push 已完成返回 "Everything up-to-date" 但被误读为超时
 
@@ -408,3 +409,88 @@ fix: spiral connector wire on fillet + loft-based arc band fillet solid
 - Side faces transition smoothly from blade angle (z=r) to expanded angle (z=0)
 - Bifurcation of adjacent band side faces starts at z=r on blade surface
 ```
+
+---
+
+## 15. 当前代码架构 (2026-05-11)
+
+### 15.1 整体几何结构
+
+```
+                    叶身 (blade)
+                   z = blade_height (80mm)
+                   │
+    blade 外表面     │  ← blade sub-solid: XY面沿+Z挤出
+    (半径 R=33)     │
+                   z = r (2mm) ← 叶身-倒圆交界 ★分叉点★
+                   │
+    ┌──────────────┤
+    │ 倒圆 (fillet) │  ← fillet sub-solid: ThruSections loft (arc)
+    │ R → R+r      │    或 BRepPrimAPI_MakePrism (straight)
+    └──────────────┤    或 split straight+arc (transition)
+                   z = 0 ← 倒圆-缘板交界
+    ┌──────────────┤
+    │ 缘板(endwall)│  ← endwall sub-solid: XY梯形面沿-Z挤出
+    │ R+r → R+off  │
+    └──────────────┤
+                   z = -thickness (-1mm)
+```
+
+### 15.2 三条曲线 (俯视)
+
+| 曲线 | 弧段半径 | 角度跨度 (同弧长L=16.23mm) | 用途 |
+|------|----------|---------------------------|------|
+| 叶身外廓 | R=33 | 28.2° (宽) | blade层 + fillet内边界 |
+| 倒圆底边 | R+r=35 | 26.6° | fillet底 + endwall内边界 |
+| 扩展曲线 | R+offset=93 | 10.0° (窄) | endwall外边界 |
+
+### 15.3 角度体系
+
+每个 band 有两套角度：
+
+| 角度 | 分母 | 弧段span | 用于 |
+|------|------|----------|------|
+| θ_in | R=33 | ~28.2° | blade层、fillet内边界、endwall内边界 |
+| θ_out | R+offset=93 | ~10.0° | endwall外边界、fillet侧边终点 |
+
+```python
+# 纯弧段 (on_arc):
+θ_in0, θ_in1 = _band_arc_angles_deg(s0, s1)          # 分母 R
+θ_out_center = θ_low + (expanded_center - arc_start)/(R+offset)
+θ_out_half = 0.5 * blade_seg_len/(R+offset)
+θ_out0, θ_out1 = θ_out_center ± θ_out_half           # 分母 R+offset
+
+# 过渡段: 外角从 q0_len/q1_len (扩展曲线位置) 计算
+```
+
+### 15.4 Band 三层构建
+
+**Blade 层 (z=r→blade_height)**: XY截面(外弧R,内弧R-t,径向侧边) → 沿+Z挤出 → 平移到z=r
+
+**Fillet 层 (z=0→z=r)**:
+- Arc: `_make_fillet_solid_loft` — ThruSections, 6截面, 侧边螺旋 θ(z)=θ_in+(θ_out-θ_in)×(r-z)/r
+- Straight: `_make_fillet_solid_straight` — Prism沿切线
+- Transition: `_make_fillet_solid_transition` — 拆straight+arc
+
+**Endwall 层 (z=-thickness→z=0)**: 梯形面(内弧R+r叶身角,外弧R+offset扩展角,非径向侧边) → 沿-Z挤出
+
+**融合**: `blade_solid.fuse(fillet_solid).fuse(endwall_solid)`
+
+### 15.5 参考线 (Connector Wire)
+
+弧段 spiral: `blade顶 → z=r(★分叉) → 倒圆面螺旋(θ渐変,R跟随四分之一圆弧) → 缘板顶面 → 扩展曲线 → 缘板底面`
+
+相邻band侧线从z=r处分叉 (q1_i ≠ q0_{i+1})。
+
+### 15.6 几何数据
+
+```
+叶身外侧总长: 194.71mm (下直36 + 弧126.7 + 上直32)
+扩展曲线总长: 425.09mm (下直36 + 弧357.1 + 上直32)
+12 bands × 16.23mm: bands 0-1纯下直, 2下过渡, 3-9纯弧, 10上过渡, 11纯上直
+```
+
+### 15.7 已知限制
+
+1. Transition band fillet 仍用 revolve+prism 拆分，侧面径向
+2. Endwall 侧面(垂直平面)与 fillet 侧面(螺旋曲面)在 z=0 处不连续
