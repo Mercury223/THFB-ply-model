@@ -1311,15 +1311,27 @@ class VaneBladeAndEndwallBuilder:
             elif is_lower_trans:
                 θ_in0 = _θ_low
                 _, θ_in1 = self._band_arc_angles_deg(arc_start, s1)
-                θ_out0 = _θ_low
+                # outer angles from expanded curve positions
+                if q0_len >= arc_start:
+                    θ_out0 = _θ_low + _deg(
+                        (q0_len - arc_start) / (_Rblade + _offset))
+                else:
+                    θ_out0 = _θ_low
                 θ_out1 = _θ_low + _deg(
-                    (s1 - arc_start) / (_Rblade + _offset))
+                    (q1_len - arc_start) / (_Rblade + _offset))
             elif is_upper_trans:
                 θ_in0, _ = self._band_arc_angles_deg(s0, arc_end)
                 θ_in1 = _θ_up
-                θ_out0 = _θ_up - _deg(
-                    (arc_end - s0) / (_Rblade + _offset))
-                θ_out1 = _θ_up
+                # outer angles from expanded curve positions
+                _exp_arc_end = arc_start + (
+                    float(outer_profile["radius"]) + _offset) * arc_angle_rad
+                θ_out0 = _θ_low + _deg(
+                    (q0_len - arc_start) / (_Rblade + _offset))
+                if q1_len <= _exp_arc_end:
+                    θ_out1 = _θ_low + _deg(
+                        (q1_len - arc_start) / (_Rblade + _offset))
+                else:
+                    θ_out1 = _θ_up
 
             # ── Build fillet sub-solid (z=0 .. r) ──
             if r > 1e-9:
@@ -1524,26 +1536,41 @@ class VaneBladeAndEndwallBuilder:
                     inner_arc = self._make_circular_arc_edge(
                         0, 0, Rblade + r, θ_in0, θ_in1)
 
-                    # Outer: polyline(q0→exp_as) + arc(exp_as→q1, expanded angles)
-                    eq_as = cq.Vector((Rblade + offset) * math.cos(out_a0r),
-                                      (Rblade + offset) * math.sin(out_a0r), 0.0)
-                    outer_arc = self._make_circular_arc_edge(
-                        0, 0, Rblade + offset, θ_out1, θ_out0)
-
                     fb_s1 = cq.Vector((Rblade + r) * math.cos(in_a1r),
                                       (Rblade + r) * math.sin(in_a1r), 0.0)
                     eq_s1 = cq.Vector((Rblade + offset) * math.cos(out_a1r),
                                       (Rblade + offset) * math.sin(out_a1r), 0.0)
 
-                    endwall_edges = [
-                        cq.Edge.makeLine(fb_s0, fb_as),
-                        inner_arc,
-                        cq.Edge.makeLine(fb_s1, eq_s1),
-                        outer_arc,
-                        cq.Edge.makeLine(eq_as, q0),
-                        cq.Edge.makeLine(q0, fb_s0),
-                    ]
+                    # Outer: may be all-arc or polyline+arc
+                    if q0_len >= arc_start:
+                        # all arc: q0→q1
+                        eq_s0 = cq.Vector((Rblade + offset) * math.cos(out_a0r),
+                                          (Rblade + offset) * math.sin(out_a0r), 0.0)
+                        outer_arc = self._make_circular_arc_edge(
+                            0, 0, Rblade + offset, θ_out1, θ_out0)
+                        endwall_edges = [
+                            cq.Edge.makeLine(fb_s0, fb_as),
+                            inner_arc,
+                            cq.Edge.makeLine(fb_s1, eq_s1),
+                            outer_arc,
+                            cq.Edge.makeLine(eq_s0, fb_s0),
+                        ]
+                    else:
+                        # straight(q0→exp_as) + arc(exp_as→q1)
+                        eq_as = cq.Vector((Rblade + offset) * math.cos(out_a0r),
+                                          (Rblade + offset) * math.sin(out_a0r), 0.0)
+                        outer_arc = self._make_circular_arc_edge(
+                            0, 0, Rblade + offset, θ_out1, θ_out0)
+                        endwall_edges = [
+                            cq.Edge.makeLine(fb_s0, fb_as),
+                            inner_arc,
+                            cq.Edge.makeLine(fb_s1, eq_s1),
+                            outer_arc,
+                            cq.Edge.makeLine(eq_as, q0),
+                            cq.Edge.makeLine(q0, fb_s0),
+                        ]
                 else:
+                    # Upper transition
                     # Inner: arc(s0→ae, blade angles) + straight(ae→s1)
                     inner_arc = self._make_circular_arc_edge(
                         0, 0, Rblade + r, θ_in0, θ_in1)
@@ -1557,25 +1584,42 @@ class VaneBladeAndEndwallBuilder:
                     fb_s1 = cq.Vector(pt_s1.x + n_s1.x * r,
                                       pt_s1.y + n_s1.y * r, 0.0)
 
-                    # Outer: arc(q0→exp_ae, expanded angles) + polyline(exp_ae→q1)
-                    outer_arc = self._make_circular_arc_edge(
-                        0, 0, Rblade + offset, θ_out1, θ_out0)
-
-                    eq_ae = cq.Vector((Rblade + offset) * math.cos(out_a1r),
-                                      (Rblade + offset) * math.sin(out_a1r), 0.0)
                     fb_s0 = cq.Vector((Rblade + r) * math.cos(in_a0r),
                                       (Rblade + r) * math.sin(in_a0r), 0.0)
                     eq_s0 = cq.Vector((Rblade + offset) * math.cos(out_a0r),
                                       (Rblade + offset) * math.sin(out_a0r), 0.0)
 
-                    endwall_edges = [
-                        inner_arc,
-                        cq.Edge.makeLine(fb_ae, fb_s1),
-                        cq.Edge.makeLine(fb_s1, q1),
-                        cq.Edge.makeLine(q1, eq_ae),
-                        outer_arc,
-                        cq.Edge.makeLine(eq_s0, fb_s0),
-                    ]
+                    _exp_arc_end = arc_start + (
+                        float(outer_profile["radius"]) + offset) * arc_angle_rad
+
+                    # Outer: may be all-arc or arc+polyline
+                    if q1_len <= _exp_arc_end:
+                        # all arc: q0→q1
+                        eq_s1 = cq.Vector((Rblade + offset) * math.cos(out_a1r),
+                                          (Rblade + offset) * math.sin(out_a1r), 0.0)
+                        outer_arc = self._make_circular_arc_edge(
+                            0, 0, Rblade + offset, θ_out1, θ_out0)
+                        endwall_edges = [
+                            inner_arc,
+                            cq.Edge.makeLine(fb_ae, fb_s1),
+                            cq.Edge.makeLine(fb_s1, eq_s1),
+                            outer_arc,
+                            cq.Edge.makeLine(eq_s0, fb_s0),
+                        ]
+                    else:
+                        # arc(q0→exp_ae) + polyline(exp_ae→q1)
+                        eq_ae = cq.Vector((Rblade + offset) * math.cos(out_a1r),
+                                          (Rblade + offset) * math.sin(out_a1r), 0.0)
+                        outer_arc = self._make_circular_arc_edge(
+                            0, 0, Rblade + offset, θ_out1, θ_out0)
+                        endwall_edges = [
+                            inner_arc,
+                            cq.Edge.makeLine(fb_ae, fb_s1),
+                            cq.Edge.makeLine(fb_s1, q1),
+                            cq.Edge.makeLine(q1, eq_ae),
+                            outer_arc,
+                            cq.Edge.makeLine(eq_s0, fb_s0),
+                        ]
             else:
                 # 纯直线段：折线采样
                 exp_bottom_n = max(4, int(abs(q1_len - q0_len) * 0.3))

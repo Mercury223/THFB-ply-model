@@ -304,3 +304,36 @@ fix: restore blade layer in ply bands with correct blade-curve angles
 - Side faces connect wide (blade) to narrow (expanded) angular spans
 - Trapezoidal endwall face preserves roughly constant arc-length band width
 ```
+
+---
+
+## 12. 过渡 band 外边界角度修正 (2026-05-11)
+
+### 问题
+
+过渡 band（跨直线段-圆弧段边界）的外边界角度使用了 blade 弧长 (s1-s0) 除以 (R+offset)，但扩展曲线上的 band 中心因弧段缩放比例不同会发生偏移，导致外边界起点/终点不在预期位置。
+
+### 修复
+
+**过渡 band 外边界角度**：改用扩展曲线上的 arc length 位置 (q0_len, q1_len) 计算角度：
+- Lower transition: `θ_out0 = θ_low + (max(q0_len, arc_start) - arc_start) / (R+offset)`
+- Upper transition: `θ_out1 = θ_low + (min(q1_len, expanded_arc_end) - arc_start) / (R+offset)`
+
+**端壁面构造**：根据 q0/q1 是否在圆弧区域内，判断外边界为全弧还是折线+弧：
+- Lower transition: q0 >= arc_start → 外边界全弧 (q0→q1)；否则折线+弧
+- Upper transition: q1 <= expanded_arc_end → 外边界全弧 (q0→q1)；否则弧+折线
+
+### 验证结果
+
+- **12 bands (20°步长)**：12/12，VALIDATION PASSED
+- **45 bands (5°步长)**：45/45，VALIDATION PASSED（visualize_ply.py 验证）
+
+### Commit
+
+```
+fix: compute transition band outer angles from expanded curve positions
+
+- Use q0_len/q1_len (expanded curve arc length) for outer angles, not s0/s1
+- Handle all-arc outer boundary case when q positions fall in arc region
+- Endwall outer boundary adapts to all-arc or polyline+arc based on q position
+```
