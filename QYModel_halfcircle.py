@@ -1,7 +1,13 @@
-"""Half-circle blade test — curves only, no solids.
+"""Half-circle blade test — curves only, hyperbolic spiral formulation.
 
-Simplified model: half-circle blade (180°, R=33), no straight segments.
-Generate ply reference curves: stations, blade_equal_arc, expanded_equal_arc, side_a, side_b.
+User's notation:
+  r = blade outer radius (= OUTER_RADIUS = 33)
+  R = fillet radius in xz profile (= FILLET_RADIUS = 2)
+
+Hyperbolic spiral (双曲螺线) in fillet:
+  ρ ∈ [r, r+R]:   ρ × Δθ = C  (equal arc-length),  z = R - √(R² - (r+R-ρ)²)
+  ρ ∈ [r+R, r+R+off]:  z = 0, θ follows same spiral to expanded endpoint
+  ρ = r+R+off:  drop to z = -t
 """
 import math
 import cadquery as cq
@@ -9,35 +15,35 @@ from pathlib import Path
 
 # ── Parameters ──
 BLADE_HEIGHT = 80.0
-OUTER_RADIUS = 33.0
-BLADE_THICKNESS = 4.0
-FILLET_RADIUS = 2.0
+OUTER_RADIUS = 33.0     # user's r — blade outer radius
+FILLET_RADIUS = 2.0     # user's R — fillet quarter-circle radius
 PLY_EXPAND_OFFSET = 60.0
 PLY_LAYER_THICKNESS = 1.0
 ANGLE_START = -90.0
 ANGLE_END = 90.0
 N_BANDS = 3
-PLY_FILLET_SAMPLES = 12
+N_SAMPLES = 30  # sample count for spiral curves
 
-R = OUTER_RADIUS
-r = FILLET_RADIUS
+# User's notation (match the derivation)
+r_blade = OUTER_RADIUS   # inner circle radius = 33
+R_fillet = FILLET_RADIUS  # xz profile quarter-circle radius = 2
 off = PLY_EXPAND_OFFSET
 t = PLY_LAYER_THICKNESS
-ARC_LEN = R * math.radians(ANGLE_END - ANGLE_START)
-BLADE_SEG_LEN = ARC_LEN / N_BANDS
-ARC_ANGLE_RAD = math.radians(ANGLE_END - ANGLE_START)
+C = r_blade * math.radians(ANGLE_END - ANGLE_START) / N_BANDS  # equal arc-length per band
 
-print(f"Half-circle curves test")
-print(f"  arc: {ANGLE_START}° → {ANGLE_END}°")
-print(f"  blade arc length: {ARC_LEN:.3f} mm")
-print(f"  expanded arc length: {(R+off) * ARC_ANGLE_RAD:.3f} mm")
-print(f"  bands: {N_BANDS}, seg_len: {BLADE_SEG_LEN:.3f} mm")
-print(f"  blade angle per band: {ANGLE_END-ANGLE_START:.0f}°/{N_BANDS} = {math.degrees(BLADE_SEG_LEN/R):.1f}°")
-print(f"  expanded angle per band: {math.degrees(BLADE_SEG_LEN/(R+off)):.1f}°")
+print(f"Hyperbolic spiral curves test")
+print(f"  r (blade radius) = {r_blade}")
+print(f"  R (fillet radius) = {R_fillet}")
+print(f"  offset = {off}")
+print(f"  C (arc length per band) = {C:.4f} mm")
+print(f"  bands: {N_BANDS}")
+print(f"  blade angle per band: {math.degrees(C/r_blade):.1f}°")
+print(f"  angle at ρ=r+R={r_blade+R_fillet}: {math.degrees(C/(r_blade+R_fillet)):.1f}°")
+print(f"  angle at ρ=r+R+off={r_blade+R_fillet+off}: {math.degrees(C/(r_blade+R_fillet+off)):.1f}°")
 
 
-def v3(p, z):
-    return cq.Vector(float(p.x), float(p.y), float(z))
+def v3(x, y, z):
+    return cq.Vector(float(x), float(y), float(z))
 
 
 def make_arc_edge(cx, cy, radius, angle0_deg, angle1_deg):
@@ -53,68 +59,85 @@ def make_arc_edge(cx, cy, radius, angle0_deg, angle1_deg):
 def make_polyline_edge(pts_3d):
     edges = []
     for i in range(len(pts_3d) - 1):
+        d = pts_3d[i].sub(pts_3d[i + 1]).Length
+        if d < 1e-9:
+            continue
         edges.append(cq.Edge.makeLine(pts_3d[i], pts_3d[i + 1]))
     return cq.Wire.assembleEdges(edges)
 
 
-def connector_wire(root_xy, end_xy, normal_xy):
-    """Build connector wire from blade top → blade-fillet → fillet surface → expanded → endwall bottom."""
-    pts = [
-        v3(root_xy, BLADE_HEIGHT),   # blade top
-        v3(root_xy, r),              # blade-fillet junction
-    ]
-    # Follow fillet quarter-circle along normal direction
-    n = max(3, PLY_FILLET_SAMPLES)
-    # Skip last sample (i=n) to avoid duplicating endwall_start
-    for i in range(1, n):
-        theta = 0.5 * math.pi * i / n
-        rad = r * (1.0 - math.cos(theta))
-        z = r * (1.0 - math.sin(theta))
-        q = cq.Vector(
-            root_xy.x + normal_xy.x * rad,
-            root_xy.y + normal_xy.y * rad, 0.0)
-        pts.append(v3(q, z))
-    # Fillet bottom = endwall top (z=0, R+r along normal)
-    ew_start = cq.Vector(
-        root_xy.x + normal_xy.x * r,
-        root_xy.y + normal_xy.y * r, 0.0)
-    pts.append(v3(ew_start, 0.0))
-    # Expanded curve point at z=0
-    pts.append(v3(end_xy, 0.0))
-    # Endwall bottom
-    pts.append(v3(end_xy, -t))
+def z_fillet(rho):
+    """Quarter-circle height: z = R - √(R² - (r+R-ρ)²) for ρ ∈ [r, r+R]."""
+    d = r_blade + R_fillet - rho
+    if d < 0:
+        d = 0
+    if d > R_fillet:
+        d = R_fillet
+    return R_fillet - math.sqrt(max(0, R_fillet**2 - d**2))
+
+
+def connector_wire(theta_ref_deg, is_side_b=False):
+    """Build 3D connector wire.
+
+    theta_ref = band START angle θ₀.
+
+    side_a (is_side_b=False): radial line, θ = θ_ref for all ρ.
+      Blade junction at (r_blade, θ_ref).
+
+    side_b (is_side_b=True): hyperbolic spiral, θ(ρ) = θ_ref + C/ρ.
+      At ρ=r_blade: θ = θ_ref + C/r_blade = band END angle.  ← wire starts here
+      Blade junction at (r_blade, θ_ref + C/r_blade).
+
+    Path: blade top → blade-fillet junction → fillet spiral (ρ: r→r+R)
+          → endwall top (ρ: r+R→r+R+off, z=0) → drop to z=-t
+    """
+    θ_ref = math.radians(theta_ref_deg)
+
+    # Blade junction angle
+    if is_side_b:
+        θ_junction = θ_ref + C / r_blade  # band end angle on inner circle
+    else:
+        θ_junction = θ_ref               # band start angle (radial)
+
+    pts = []
+
+    # 1) Blade top → blade-fillet junction
+    pts.append(v3(r_blade * math.cos(θ_junction),
+                  r_blade * math.sin(θ_junction), BLADE_HEIGHT))
+    pts.append(v3(r_blade * math.cos(θ_junction),
+                  r_blade * math.sin(θ_junction), R_fillet))
+
+    # 2) Fillet: ρ ∈ [r_blade, r_blade + R_fillet]
+    n_fillet = N_SAMPLES // 2
+    for i in range(1, n_fillet + 1):
+        rho = r_blade + R_fillet * i / n_fillet
+        if is_side_b:
+            theta = θ_ref + C / rho
+        else:
+            theta = θ_ref
+        z = z_fillet(rho)
+        pts.append(v3(rho * math.cos(theta), rho * math.sin(theta), z))
+
+    # 3) Endwall top: ρ ∈ [r_blade+R_fillet, r_blade+R_fillet+off], z=0
+    n_endwall = N_SAMPLES // 2
+    for i in range(1, n_endwall + 1):
+        rho = (r_blade + R_fillet) + off * i / n_endwall
+        if is_side_b:
+            theta = θ_ref + C / rho
+        else:
+            theta = θ_ref
+        pts.append(v3(rho * math.cos(theta), rho * math.sin(theta), 0.0))
+
+    # 4) Drop to endwall bottom
+    rho_end = r_blade + R_fillet + off
+    if is_side_b:
+        theta_end = θ_ref + C / rho_end
+    else:
+        theta_end = θ_ref
+    pts.append(v3(rho_end * math.cos(theta_end), rho_end * math.sin(theta_end), -t))
+
     return make_polyline_edge(pts)
 
-
-# ═══════════════════════════════════════════════════════════════
-# Station points on blade profile
-# ═══════════════════════════════════════════════════════════════
-
-stations_s = [i * BLADE_SEG_LEN for i in range(N_BANDS + 1)]
-stations = []
-for s in stations_s:
-    angle_deg = ANGLE_START + math.degrees(s / R)
-    angle_rad = math.radians(angle_deg)
-    pt = cq.Vector(R * math.cos(angle_rad), R * math.sin(angle_rad), 0)
-    normal = cq.Vector(math.cos(angle_rad), math.sin(angle_rad), 0)
-    stations.append((s, angle_deg, pt, normal))
-
-# ═══════════════════════════════════════════════════════════════
-# Expanded curve points
-# ═══════════════════════════════════════════════════════════════
-
-def map_to_expanded(s):
-    """Map blade arc position to expanded curve position (arc-only)."""
-    return s * (R + off) / R
-
-expanded_pts = []
-for s in stations_s:
-    exp_s = map_to_expanded(s)
-    angle_deg = ANGLE_START + math.degrees(exp_s / (R + off))
-    angle_rad = math.radians(angle_deg)
-    pt = cq.Vector((R + off) * math.cos(angle_rad),
-                   (R + off) * math.sin(angle_rad), 0)
-    expanded_pts.append((exp_s, angle_deg, pt))
 
 # ═══════════════════════════════════════════════════════════════
 # Build curves
@@ -122,41 +145,59 @@ for s in stations_s:
 
 curves = {}
 
-# 1) Station connector wires
-for idx, (s, angle_deg, pt, normal) in enumerate(stations):
-    exp_s, exp_angle, exp_pt = expanded_pts[idx]
-    curves[f"ply_station_{idx:04d}"] = connector_wire(pt, exp_pt, normal)
+# Station positions on blade (equal arc-length)
+station_angles_deg = [
+    ANGLE_START + math.degrees(i * C / r_blade) for i in range(N_BANDS + 1)
+]
 
-# 2) Band curves: blade_equal_arc, expanded_equal_arc, side_a, side_b
+# 1) Station wires (θ fixed = radial lines)
+for idx, ang in enumerate(station_angles_deg):
+    curves[f"ply_station_{idx:04d}"] = connector_wire(ang, is_side_b=False)
+    print(f"  station {idx}: blade θ={ang:.1f}° (radial)")
+
+# 2) Band curves
 for idx in range(N_BANDS):
-    s0_s, s0_angle, s0_pt, s0_n = stations[idx]
-    s1_s, s1_angle, s1_pt, s1_n = stations[idx + 1]
-    exp0_s, exp0_angle, exp0_pt = expanded_pts[idx]
-    exp1_s, exp1_angle, exp1_pt = expanded_pts[idx + 1]
+    θ0 = station_angles_deg[idx]      # band start on blade
+    θ1 = station_angles_deg[idx + 1]  # band end on blade
 
     # Blade equal-arc segment
-    blade_arc = make_arc_edge(0, 0, R, s0_angle, s1_angle)
+    blade_arc = make_arc_edge(0, 0, r_blade, θ0, θ1)
     curves[f"ply_band_{idx:04d}_blade_equal_arc"] = blade_arc
 
-    # Expanded equal-arc segment
-    exp_center_s = map_to_expanded(0.5 * (s0_s + s1_s))
-    q0_s = exp_center_s - BLADE_SEG_LEN / 2
-    q1_s = exp_center_s + BLADE_SEG_LEN / 2
-    q0_angle = ANGLE_START + math.degrees(q0_s / (R + off))
-    q1_angle = ANGLE_START + math.degrees(q1_s / (R + off))
-    expanded_arc = make_arc_edge(0, 0, R + off, q0_angle, q1_angle)
+    # Expanded equal-arc segment: hyperbolic spiral endpoints at ρ_end
+    ρ_end = r_blade + R_fillet + off
+    θ0_exp_deg = math.degrees(math.radians(θ0) + C / ρ_end)
+    θ1_exp_deg = math.degrees(math.radians(θ0) + C / ρ_end)
+    # For side_b at band end: θ_end = θ_start + C/ρ_end
+    # θ_start of band = θ0. Band covers C/r_blade on blade.
+    # At ρ_end, side_a is at θ0_exp (θ0 + C/ρ_end)
+    # side_b is at θ0 + C/ρ_end  (same formula since θ0 already includes offset)
+
+    # The expanded band endpoints are:
+    # side_a of band i: θ = θ0 + C/ρ_end  (if side_a follows spiral too? No, side_a is radial)
+    # Hmm, but the user says side_a is radial (θ constant)
+    # So at ρ_end: side_a at θ0, side_b at θ0 + C/ρ_end
+
+    # For the expanded equal-arc curve, we show the band at ρ = r+R+off:
+    θ_a_end = θ0  # side_a at expanded radius (radial)
+    θ_b_end = math.degrees(math.radians(θ0) + C / ρ_end)  # side_b at expanded radius (spiral)
+
+    expanded_arc = make_arc_edge(0, 0, ρ_end, θ_a_end, θ_b_end)
     curves[f"ply_band_{idx:04d}_expanded_equal_arc"] = expanded_arc
 
-    # Side A and Side B connector wires
-    q0_pt = cq.Vector((R + off) * math.cos(math.radians(q0_angle)),
-                      (R + off) * math.sin(math.radians(q0_angle)), 0)
-    q1_pt = cq.Vector((R + off) * math.cos(math.radians(q1_angle)),
-                      (R + off) * math.sin(math.radians(q1_angle)), 0)
+    # Side A: θ = θ0 (radial line, fixed angle)
+    curves[f"ply_band_{idx:04d}_side_a"] = connector_wire(θ0, is_side_b=False)
 
-    curves[f"ply_band_{idx:04d}_side_a"] = connector_wire(s0_pt, q0_pt, s0_n)
-    curves[f"ply_band_{idx:04d}_side_b"] = connector_wire(s1_pt, q1_pt, s1_n)
-    print(f"  band {idx}: blade [{s0_angle:.1f}°→{s1_angle:.1f}°] "
-          f"expanded [{q0_angle:.1f}°→{q1_angle:.1f}°]")
+    # Side B: hyperbolic spiral from θ = θ1 at ρ=r to θ = θ0 + C/ρ at each ρ
+    # Wait — at ρ=r, side_b should be at θ1 = θ0 + C/r (band end on blade)
+    # The spiral formula: θ(ρ) = θ0 + C/ρ
+    # At ρ=r: θ = θ0 + C/r = θ1 ✓
+    # So side_b spiral starts from θ0 (the band START angle), not θ1!
+    curves[f"ply_band_{idx:04d}_side_b"] = connector_wire(θ0, is_side_b=True)
+
+    print(f"  band {idx}: blade[{θ0:.1f}°→{θ1:.1f}°] "
+          f"expanded[{θ_a_end:.1f}°→{θ_b_end:.1f}°] "
+          f"span={θ_b_end-θ_a_end:.1f}°")
 
 # ═══════════════════════════════════════════════════════════════
 # Export STEP
@@ -167,7 +208,6 @@ step_path = current_dir / "halfcircle_curves.step"
 
 assy = cq.Assembly(name="HALFCIRCLE_CURVES")
 
-# Color by type
 for name, wire in curves.items():
     if "station" in name:
         color = cq.Color(1.0, 1.0, 0.0)  # yellow
@@ -189,10 +229,12 @@ assy.export(str(step_path))
 print(f"\n[STEP exported] {step_path}")
 print(f"  curves: {len(curves)}")
 
-# Print key coordinates for verification
-print(f"\n[Verification points]")
-for idx in range(N_BANDS + 1):
-    s, angle, pt, _ = stations[idx]
-    exp_s, exp_angle, exp_pt = expanded_pts[idx]
-    print(f"  station {idx}: s={s:.1f}mm, blade({pt.x:.2f},{pt.y:.2f}) "
-          f"→ expanded({exp_pt.x:.2f},{exp_pt.y:.2f})")
+# Verification
+print(f"\n[Verification]")
+for idx in range(N_BANDS):
+    θ0 = station_angles_deg[idx]
+    ρ_end = r_blade + R_fillet + off
+    print(f"  band {idx}: side_a spiral? No (θ={θ0:.1f}° fixed)")
+    print(f"           side_b at ρ={r_blade}: θ={θ0 + math.degrees(C/r_blade):.1f}°")
+    print(f"           side_b at ρ={r_blade+R_fillet}: θ={θ0 + math.degrees(C/(r_blade+R_fillet)):.1f}°")
+    print(f"           side_b at ρ={ρ_end}: θ={θ0 + math.degrees(C/ρ_end):.1f}°")
