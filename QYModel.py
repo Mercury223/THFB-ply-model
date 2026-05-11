@@ -1227,13 +1227,12 @@ class VaneBladeAndEndwallBuilder:
     def build_ply_band_solids(self, outer_profile):
         """为每个铺层带生成有厚度的可视化实体。
 
-        每个 band 实体 = fillet 段 + endwall 段，两段融合：
-          - fillet 层 (z=0 .. r)：从叶身-倒圆交界(z=r)开始，倒圆截面绕 Z 轴回转(arc)
-                                   或沿直线方向拉伸(straight)
-          - endwall 层 (z=-thickness .. 0)：梯形端壁面，内边界用叶身角度(宽)，外边界用
-                                   扩展角度(窄)，沿 -Z 拉伸，保持弧长宽度基本一致
+        每个 band 实体 = blade 段 + fillet 段 + endwall 段，三段融合：
+          - blade  层 (z=r .. blade_height)：叶身外表面向内偏置(叶身角度)，沿 Z 拉伸
+          - fillet 层 (z=0 .. r)：倒圆四分之一圆环截面绕 Z 轴回转/沿切线拉伸 (叶身角度)
+          - endwall 层 (z=-thickness .. 0)：梯形面，内边界叶身角度(宽)→外边界扩展角度(窄)
 
-        叶身层不再分配到各 band 中（叶身是连续整体）。
+        三层曲线（叶身外廓/倒圆底边/扩展曲线）上取等弧长段，侧面连接。
         """
         p = self.p
         thickness = float(p.ply_layer_thickness)
@@ -1323,7 +1322,6 @@ class VaneBladeAndEndwallBuilder:
                 θ_out1 = _θ_up
 
             # ── Build fillet sub-solid (z=0 .. r) ──
-            # ── 倒圆实体从叶身-倒圆交界(z=r)开始，延伸到缘板顶面(z=0) ──
             if r > 1e-9:
                 if on_arc:
                     fillet_solid = self._make_fillet_solid_arc(
@@ -1334,7 +1332,6 @@ class VaneBladeAndEndwallBuilder:
                         float(outer_profile["radius"]), r, thickness,
                         s0, s1, outer_profile)
                 else:
-                    # transition: arc portion uses blade (inner) angles
                     if is_lower_trans:
                         _f_arc_θ0, _f_arc_θ1 = θ_in0, θ_in1
                     else:
@@ -1345,6 +1342,134 @@ class VaneBladeAndEndwallBuilder:
                         arc_start, arc_end, _f_arc_θ0, _f_arc_θ1)
             else:
                 fillet_solid = None
+
+            # ── Build blade sub-solid (z=r .. blade_height) ──
+            blade_height = float(p.blade_height)
+            if on_arc:
+                Rblade = float(outer_profile["radius"])
+                a0r, a1r = math.radians(θ_in0), math.radians(θ_in1)
+
+                blade_outer_arc = self._make_circular_arc_edge(
+                    0, 0, Rblade, θ_in0, θ_in1)
+                blade_inner_arc = self._make_circular_arc_edge(
+                    0, 0, Rblade - thickness, θ_in1, θ_in0)
+
+                bp_start = cq.Vector(
+                    Rblade * math.cos(a0r), Rblade * math.sin(a0r), 0.0)
+                bp_end = cq.Vector(
+                    Rblade * math.cos(a1r), Rblade * math.sin(a1r), 0.0)
+                ip_start = cq.Vector(
+                    (Rblade - thickness) * math.cos(a0r),
+                    (Rblade - thickness) * math.sin(a0r), 0.0)
+                ip_end = cq.Vector(
+                    (Rblade - thickness) * math.cos(a1r),
+                    (Rblade - thickness) * math.sin(a1r), 0.0)
+
+                blade_edges = [
+                    blade_outer_arc,
+                    cq.Edge.makeLine(bp_end, ip_end),
+                    blade_inner_arc,
+                    cq.Edge.makeLine(ip_start, bp_start),
+                ]
+            elif is_lower_trans or is_upper_trans:
+                Rblade = float(outer_profile["radius"])
+                if is_lower_trans:
+                    s_line = (s0, arc_start)
+                    θ_arc0 = p.lower_tangent_angle_deg
+                    _, θ_arc1 = self._band_arc_angles_deg(arc_start, s1)
+                else:
+                    s_line = (arc_end, s1)
+                    θ_arc0, _ = self._band_arc_angles_deg(s0, arc_end)
+                    θ_arc1 = p.upper_tangent_angle_deg
+
+                a0r, a1r = math.radians(θ_arc0), math.radians(θ_arc1)
+                arc_start_pt = cq.Vector(
+                    Rblade * math.cos(a0r), Rblade * math.sin(a0r), 0.0)
+                arc_end_pt = cq.Vector(
+                    Rblade * math.cos(a1r), Rblade * math.sin(a1r), 0.0)
+                ias = cq.Vector(
+                    (Rblade - thickness) * math.cos(a0r),
+                    (Rblade - thickness) * math.sin(a0r), 0.0)
+                iae = cq.Vector(
+                    (Rblade - thickness) * math.cos(a1r),
+                    (Rblade - thickness) * math.sin(a1r), 0.0)
+
+                pt_l0, _, n_l0 = self._outer_profile_point_tangent_normal_at_s(
+                    outer_profile, s_line[0])
+                pt_l1, _, n_l1 = self._outer_profile_point_tangent_normal_at_s(
+                    outer_profile, s_line[1])
+                il0 = cq.Vector(pt_l0.x - n_l0.x * thickness,
+                                pt_l0.y - n_l0.y * thickness, 0.0)
+                il1 = cq.Vector(pt_l1.x - n_l1.x * thickness,
+                                pt_l1.y - n_l1.y * thickness, 0.0)
+
+                outer_arc_edge = self._make_circular_arc_edge(
+                    0, 0, Rblade, θ_arc0, θ_arc1)
+                inner_arc_edge = self._make_circular_arc_edge(
+                    0, 0, Rblade - thickness, θ_arc1, θ_arc0)
+
+                if is_lower_trans:
+                    bp_start, bp_end = pt_l0, arc_end_pt
+                    ip_start, ip_end = il0, iae
+                    blade_edges = [
+                        cq.Edge.makeLine(pt_l0, arc_start_pt),
+                        outer_arc_edge,
+                        cq.Edge.makeLine(arc_end_pt, iae),
+                        inner_arc_edge,
+                        cq.Edge.makeLine(ias, il0),
+                        cq.Edge.makeLine(il0, pt_l0),
+                    ]
+                else:
+                    bp_start, bp_end = arc_start_pt, pt_l1
+                    ip_start, ip_end = ias, il1
+                    blade_edges = [
+                        outer_arc_edge,
+                        cq.Edge.makeLine(arc_end_pt, pt_l1),
+                        cq.Edge.makeLine(pt_l1, il1),
+                        cq.Edge.makeLine(il1, iae),
+                        inner_arc_edge,
+                        cq.Edge.makeLine(ias, arc_start_pt),
+                    ]
+            else:
+                n_pts = max(4, int((s1 - s0) * 4))
+                outer_xy = []
+                inner_xy = []
+                for i in range(n_pts + 1):
+                    s = s0 + (s1 - s0) * i / n_pts
+                    pt, _, normal = self._outer_profile_point_tangent_normal_at_s(
+                        outer_profile, s)
+                    outer_xy.append(pt)
+                    inner_xy.append(cq.Vector(
+                        pt.x - normal.x * thickness,
+                        pt.y - normal.y * thickness,
+                        0.0,
+                    ))
+                bp_start = outer_xy[0]
+                bp_end = outer_xy[-1]
+                ip_start = inner_xy[0]
+                ip_end = inner_xy[-1]
+
+                blade_edges = []
+                for i in range(len(outer_xy) - 1):
+                    blade_edges.append(
+                        cq.Edge.makeLine(outer_xy[i], outer_xy[i + 1]))
+                for i in range(len(inner_xy) - 1, 0, -1):
+                    blade_edges.append(
+                        cq.Edge.makeLine(inner_xy[i], inner_xy[i - 1]))
+                blade_edges.append(cq.Edge.makeLine(bp_start, ip_start))
+                blade_edges.append(cq.Edge.makeLine(ip_end, bp_end))
+
+            blade_wire = cq.Wire.assembleEdges(blade_edges)
+            blade_face = cq.Face.makeFromWires(blade_wire)
+            blade_solid = (
+                cq.Workplane("XY")
+                .add(blade_face)
+                .extrude(blade_height - r)
+                .val()
+            )
+            if r > 1e-9:
+                blade_solid = blade_solid.translate(
+                    cq.Vector(0.0, 0.0, r))
 
             # ── Build endwall sub-solid (z=-thickness .. 0) ──
             # ── 梯形端壁面：内边界(叶身角度/宽)→外边界(扩展角度/窄) ──
@@ -1480,11 +1605,11 @@ class VaneBladeAndEndwallBuilder:
                     .extrude(-thickness)
                     .val()
                 )
-                # 融合：仅 fillet + endwall（无 blade 段）
+                # 融合：blade + fillet + endwall
+                band_solid = blade_solid
                 if fillet_solid is not None:
-                    band_solid = fillet_solid.fuse(endwall_solid)
-                else:
-                    band_solid = endwall_solid
+                    band_solid = band_solid.fuse(fillet_solid)
+                band_solid = band_solid.fuse(endwall_solid)
 
                 if not band_solid.isValid():
                     raise RuntimeError("Fused solid not valid")
@@ -1505,10 +1630,11 @@ class VaneBladeAndEndwallBuilder:
         return solids
 
     def _validate_band_solids(self, solids, outer_profile):
-        """自检: 验证每个 band solid 在 fillet / endwall 区域都有材料.
+        """自检: 验证每个 band solid 在 blade / fillet / endwall 区域都有材料.
 
         测试点选取:
-          - fillet: mid-band 处, 内外弧中点, z=mid-angle 高度
+          - blade:  mid-band 处, r=-t/2, z=blade_h*0.7
+          - fillet: mid-band 处, 内外弧中点高度
           - endwall: mid-band 处, 端壁中间深度
         方向向量使用 band 中点处的实际外法向 (pt_m/normal).
         """
@@ -1517,8 +1643,10 @@ class VaneBladeAndEndwallBuilder:
         from OCP.TopAbs import TopAbs_IN
 
         p = self.p
+        R = float(p.outer_radius)
         r = float(p.root_fillet_radius)
         t = float(p.ply_layer_thickness)
+        blade_h = float(p.blade_height)
         stations = self._make_ply_station_s_values(outer_profile)
 
         errors = []
@@ -1543,6 +1671,10 @@ class VaneBladeAndEndwallBuilder:
                 c.Perform(gp_Pnt(pt.x, pt.y, pt.z), 1e-3)
                 return c.State() == TopAbs_IN
 
+            # Blade: 向内 (opposite normal) t/2, 在 blade 中上部
+            if not point_inside(-t * 0.5, blade_h * 0.7):
+                errors.append(f"band {idx}: blade region empty")
+
             # Fillet: XZ 轮廓中点 (dist=2.5 from center(35,2), angle=225°)
             # 径向偏置 ≈ r*(1-cos45°)≈0.586, z≈r*(1-sin45°)≈0.586
             if r > 1e-9:
@@ -1565,7 +1697,7 @@ class VaneBladeAndEndwallBuilder:
                 print(f"  - {e}")
         else:
             print(f"[VALIDATION PASSED] all {len(solids)} bands OK"
-                  f" (fillet + endwall)")
+                  f" (blade + fillet + endwall)")
 
     # ── Fillet solid helpers ──
 

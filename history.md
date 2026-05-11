@@ -264,3 +264,43 @@ fix: remove blade sub-solid from bands, trapezoidal endwall face
 - Blade remains one continuous body (not split into bands)
 - Restore 1e-9 tolerance for segment classification
 ```
+
+---
+
+## 11. 恢复三层 band 设计 (2026-05-11)
+
+### 问题
+
+上一版错误地移除了 blade 层，导致叶身部分完全没有铺层带。
+
+### 修复
+
+**build_ply_band_solids**：恢复 blade sub-solid 层，三层融合：
+- **blade 层** (z=r..blade_height)：叶身外表面等弧长段向内偏置(叶身角度)，沿 Z 拉伸
+- **fillet 层** (z=0..r)：倒圆截面回转/拉伸 (叶身角度)
+- **endwall 层** (z=-thickness..0)：梯形面，内边界叶身角度(宽)→外边界扩展角度(窄)
+
+三层曲线（叶身外廓 / 倒圆底边 R+r / 扩展曲线 R+offset）上各自取等弧长段：
+- 叶身外廓：弧长 = s1-s0，角度 = 弧长/R
+- 倒圆底边：弧长 = 等弧长，角度 = 弧长/(R+r)
+- 扩展曲线：弧长 = 等弧长，角度 = 弧长/(R+offset)
+- 侧面连接三个不同角度跨度的端点，保持弧长宽度基本一致
+
+**验证恢复**：blade region 检测点重新加入，三层检测通过。
+
+### 验证结果
+
+- **12 bands (20°步长)**：12/12，VALIDATION PASSED (blade + fillet + endwall)
+- **45 bands (5°步长)**：45/45，VALIDATION PASSED (blade + fillet + endwall)
+
+### Commit
+
+```
+fix: restore blade layer in ply bands with correct blade-curve angles
+
+- Three-layer band design: blade (blade angles) + fillet (blade angles) +
+  endwall (inner=blade angles, outer=expanded angles)
+- Equal arc-length segments on blade profile, fillet boundary, and expanded curve
+- Side faces connect wide (blade) to narrow (expanded) angular spans
+- Trapezoidal endwall face preserves roughly constant arc-length band width
+```
