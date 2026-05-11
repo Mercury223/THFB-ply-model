@@ -494,3 +494,39 @@ fix: spiral connector wire on fillet + loft-based arc band fillet solid
 
 1. Transition band fillet 仍用 revolve+prism 拆分，侧面径向
 2. Endwall 侧面(垂直平面)与 fillet 侧面(螺旋曲面)在 z=0 处不连续
+
+---
+
+## 16. 半圆简化模型测试 (2026-05-11)
+
+### 目的
+
+去除直线段干扰，纯弧段验证 band 几何。用上一版 (c3f027e) 的三层思路：
+- Blade 层：叶身角度，extrusion
+- Fillet 层：叶身角度，BRepPrimAPI_MakeRevol
+- Endwall 层：梯形面 (内=叶身角度, 外=扩展角度)，extrusion
+
+### 参数
+
+```python
+R=33, r=2, offset=60, t=1, blade_height=80
+半圆 180° (-90°→90°), 无直线段
+60° 步长 → 3 bands
+blade arc length = 103.67mm, blade_seg_len = 34.56mm
+```
+
+### 角度 (每 band)
+
+| Band | θ_in | span | θ_out | span |
+|------|------|------|-------|------|
+| 0 | -90°→-30° | 60° | -70.7°→-49.4° | 21.3° |
+| 1 | -30°→30° | 60° | -10.7°→10.7° | 21.3° |
+| 2 | 30°→90° | 60° | 49.4°→70.7° | 21.3° |
+
+### 结果
+
+- 3/3 bands 生成，全部 valid
+- VALIDATION PASSED (blade + fillet + endwall)
+- STEP 导出: `halfcircle_3bands.step` (164 KB)
+- 备份: `QYModel_spiral_backup.py` (当前 spiral 版)
+- 测试文件: `QYModel_halfcircle.py`
