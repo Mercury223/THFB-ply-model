@@ -373,3 +373,38 @@ fix: connector wire bifurcation at z=r on blade curve, not z=0 on fillet curve
 - side_a/side_b diverge at blade-fillet junction (z=r, radius R)
 - No longer follows fillet quarter-circle to z=0 before diverging
 ```
+
+---
+
+## 14. 参考线投影修复 + 体跟随改变 (2026-05-11)
+
+### 问题
+
+1. 参考线从 z=r 直接连到扩展曲线端点（直线），未沿倒圆面和缘板面投影
+2. band 实体未跟随参考线改变，仍用 revolve 倒圆（径向侧面）
+
+### 修复
+
+**_connector_polyline_pts**：
+- 弧段：沿倒圆面螺旋插值（角度 θ 从叶身角过渡到扩展角，径向跟随四分之一圆弧），然后沿缘板顶面走到扩展曲线，再垂直下降到缘板底面
+- 非弧段：保持原有沿法向走倒圆面的逻辑
+
+**新增 `_make_fillet_solid_loft`**：
+- 替代 `_make_fillet_solid_arc`（revolve），用 ThruSections loft 构建倒圆实体
+- 6 层截面从 z=r 到 z=0：内边界沿四分之一圆环（内弧半径 r+t）走叶身角度，外边界半径跟随四分之一圆弧，侧边角度从叶身角螺旋过渡到扩展角
+- 侧面非径向，相邻 band 侧面从 z=r 开始分叉
+
+### 验证
+
+- **12 bands (20°)**：12/12，VALIDATION PASSED (blade + fillet + endwall)
+
+### Commit
+
+```
+fix: spiral connector wire on fillet + loft-based arc band fillet solid
+
+- Connector wires now follow fillet surface (spiral) then endwall surfaces
+- Arc band fillet solid uses ThruSections loft with 6 cross-sections
+- Side faces transition smoothly from blade angle (z=r) to expanded angle (z=0)
+- Bifurcation of adjacent band side faces starts at z=r on blade surface
+```

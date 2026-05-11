@@ -1070,21 +1070,65 @@ class VaneBladeAndEndwallBuilder:
 
     def _connector_polyline_pts(self, root_xy, end_xy, normal_xy):
         """返回翻折路径的有序点列表 (top → bottom):
-        blade 顶面 → 叶身-倒圆交界(z=r) → 直接到扩展曲线端点(z=0)。
+        blade 顶面 → 叶身-倒圆交界(z=r) → 倒圆面螺旋 → 缘板顶面 → 扩展曲线端点 → 缘板底面。
 
-        side_a/side_b 分叉点位于叶身-倒圆交界 (z=r, R)，而非倒圆-缘板交界 (z=0, R+r)。
+        分叉点位于叶身-倒圆交界 (z=r, R)：两条相邻 band 的 side 线从 z=r 开始
+        沿倒圆面螺旋到各自的扩展角度端点。
         """
         p = self.p
         r = max(0.0, float(p.root_fillet_radius))
         blade_z_top = float(p.blade_height)
+        thickness = float(p.ply_layer_thickness)
+        offset = float(p.ply_expand_offset)
+        R = float(p.outer_radius)
 
-        pts = []
-        pts.append(self._v3(root_xy, blade_z_top))
+        pts = [self._v3(root_xy, blade_z_top)]
 
-        if r > 1e-9:
-            pts.append(self._v3(root_xy, r))
+        if r < 1e-9:
+            pts.append(self._v3(end_xy, 0.0))
+            return pts
+
+        pts.append(self._v3(root_xy, r))
+
+        # 判断是否在弧段（用于螺旋）
+        root_dist = math.hypot(root_xy.x, root_xy.y)
+        end_dist = math.hypot(end_xy.x, end_xy.y)
+        on_blade_arc = abs(root_dist - R) < 2.0
+        on_exp_arc = abs(end_dist - (R + offset)) < 2.0
+
+        if on_blade_arc and on_exp_arc:
+            θ_blade = math.atan2(root_xy.y, root_xy.x)
+            θ_exp = math.atan2(end_xy.y, end_xy.x)
+            n_fillet = max(4, int(p.ply_fillet_samples))
+            for i in range(1, n_fillet + 1):
+                t = i / n_fillet
+                z = r * (1.0 - t)
+                sin_phi = 1.0 - z / r
+                cos_phi = math.sqrt(max(0.0, 2.0 * z / r - (z / r) ** 2))
+                rad = r * (1.0 - cos_phi)
+                θ_s = θ_blade + (θ_exp - θ_blade) * t
+                pt_xy = cq.Vector(
+                    (R + rad) * math.cos(θ_s),
+                    (R + rad) * math.sin(θ_s), 0.0)
+                pts.append(self._v3(pt_xy, z))
+        else:
+            # 直线段/过渡段：沿法向走倒圆面
+            n = max(3, int(p.ply_fillet_samples))
+            for i in range(1, n + 1):
+                theta = 0.5 * math.pi * i / n
+                rad = r * (1.0 - math.cos(theta))
+                z = r * (1.0 - math.sin(theta))
+                q = cq.Vector(
+                    root_xy.x + normal_xy.x * rad,
+                    root_xy.y + normal_xy.y * rad, 0.0)
+                pts.append(self._v3(q, z))
+            endwall_start = cq.Vector(
+                root_xy.x + normal_xy.x * r,
+                root_xy.y + normal_xy.y * r, 0.0)
+            pts.append(self._v3(endwall_start, 0.0))
 
         pts.append(self._v3(end_xy, 0.0))
+        pts.append(self._v3(end_xy, -thickness))
         return pts
 
     def _make_surface_connector_wire(self, root_xy, end_xy, normal_xy):
@@ -1318,9 +1362,10 @@ class VaneBladeAndEndwallBuilder:
             # ── Build fillet sub-solid (z=0 .. r) ──
             if r > 1e-9:
                 if on_arc:
-                    fillet_solid = self._make_fillet_solid_arc(
+                    # ThruSections loft following fillet surface with spiral sides
+                    fillet_solid = self._make_fillet_solid_loft(
                         float(outer_profile["radius"]), r, thickness,
-                        θ_in0, θ_in1)
+                        θ_in0, θ_in1, θ_out0, θ_out1)
                 elif on_lower_straight or on_upper_straight:
                     fillet_solid = self._make_fillet_solid_straight(
                         float(outer_profile["radius"]), r, thickness,
@@ -1791,6 +1836,91 @@ class VaneBladeAndEndwallBuilder:
             solid = solid.rotate((0, 0, 0), (0, 0, 1), θ0)
 
         return solid
+
+    def _make_fillet_solid_loft(self, R, r, thickness,
+                                 θ_in0, θ_in1, θ_out0, θ_out1):
+        """Arc band 倒圆实体 (ThruSections loft).
+
+        倒圆面螺旋侧边: 内边界沿倒圆面走叶身角度(恒定),
+        外边界从 z=r 处的叶身角度过渡到 z=0 处的扩展角度。
+        """
+        import math as _math
+        from OCP.BRepOffsetAPI import BRepOffsetAPI_ThruSections
+
+        t = float(thickness)
+        r_val = float(r)
+
+        if r_val < 1e-9:
+            return None
+
+        # z levels for loft sections
+        n_sections = 6
+        sections = []
+
+        for i in range(n_sections + 1):
+            frac = i / n_sections  # 0 (z=r) → 1 (z=0)
+            z = r_val * (1.0 - frac)
+
+            # Fillet outer surface radius at height z
+            if frac < 1e-9:
+                R_outer = R
+                R_inner = R - t
+            else:
+                sin_phi = 1.0 - z / r_val
+                cos_phi = _math.sqrt(max(0.0, 2.0 * z / r_val
+                                         - (z / r_val) ** 2))
+                R_outer = R + r_val * (1.0 - cos_phi)
+                # Inner arc of quarter-ring (radius r_val+t, same center)
+                sin_phi_in = (r_val - z) / (r_val + t)
+                if sin_phi_in > 1.0:
+                    sin_phi_in = 1.0
+                cos_phi_in = _math.sqrt(max(0.0, 1.0 - sin_phi_in ** 2))
+                R_inner = (R + r_val) - (r_val + t) * cos_phi_in
+
+            # Side angles interpolating from blade to expanded
+            θ_sA = θ_in0 + (θ_out0 - θ_in0) * frac
+            θ_sB = θ_in1 + (θ_out1 - θ_in1) * frac
+
+            # Build 4-segment wire (CCW)
+            in_a0 = _math.radians(θ_in0)
+            in_a1 = _math.radians(θ_in1)
+            sA_r = _math.radians(θ_sA)
+            sB_r = _math.radians(θ_sB)
+
+            try:
+                inner_arc = self._make_circular_arc_edge(
+                    0, 0, R_inner, θ_in0, θ_in1)
+                line_b = cq.Edge.makeLine(
+                    cq.Vector(R_inner * _math.cos(in_a1),
+                              R_inner * _math.sin(in_a1), 0.0),
+                    cq.Vector(R_outer * _math.cos(sB_r),
+                              R_outer * _math.sin(sB_r), 0.0))
+                outer_arc = self._make_circular_arc_edge(
+                    0, 0, R_outer, θ_sB, θ_sA)
+                line_a = cq.Edge.makeLine(
+                    cq.Vector(R_outer * _math.cos(sA_r),
+                              R_outer * _math.sin(sA_r), 0.0),
+                    cq.Vector(R_inner * _math.cos(in_a0),
+                              R_inner * _math.sin(in_a0), 0.0))
+
+                wire = cq.Wire.assembleEdges(
+                    [inner_arc, line_b, outer_arc, line_a])
+                wire = wire.translate(cq.Vector(0, 0, z))
+                sections.append(wire)
+            except Exception:
+                return None
+
+        if len(sections) < 2:
+            return None
+
+        try:
+            loft = BRepOffsetAPI_ThruSections(True, False, 1e-4)
+            for w in sections:
+                loft.AddWire(w.wrapped)
+            loft.Build()
+            return cq.Solid(loft.Shape())
+        except Exception:
+            return None
 
     def _make_fillet_solid_straight(self, R, r, thickness, s0, s1, outer_profile):
         """Straight bands 倒圆实体: 四分之一圆环截面沿切线方向拉伸.
