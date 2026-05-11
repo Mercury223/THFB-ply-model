@@ -220,3 +220,47 @@ from QYModel import Params, VaneBladeAndEndwallBuilder
 # ... (see main() in QYModel.py)
 "
 ```
+
+---
+
+## 10. Band Solid 重构 (2026-05-11)
+
+### 问题
+
+1. **叶身被错误分割为 band 片段**：每个 band 的 blade 段（z=r..blade_height）各自独立，实际叶身应为连续整体
+2. **分割位置错误**：band 从 z=0（倒圆-缘板交界）分开，应在 z=r（倒圆-叶身交界）分开
+3. **侧面未沿 side_a/side_b**：endwall 面为环形扇区（内外同角度），应为梯形（内宽外窄），使弧长宽度基本一致
+
+### 修复
+
+**build_ply_band_solids 重写**：
+- 移除 blade sub-solid 段（叶身不再分配到各 band）
+- Band 实体 = fillet solid (z=0..r) + endwall solid (z=-thickness..0)
+- 内边界（倒圆底部，R+r）使用叶身角度（分母=R，宽）
+- 外边界（扩展曲线，R+offset）使用扩展角度（分母=R+offset，窄）
+- endwall 面变为梯形：内弧（叶身角度）→外弧（扩展角度），侧边为直线连接
+- 过渡 band：弧段内外角同（因过渡点固定），直线段并行
+
+**_validate_band_solids 更新**：
+- 移除 blade region 检测点（z > r 区域 band 不再包含）
+- 仅检测 fillet + endwall 区域
+
+**分段判定容差**：恢复为 1e-9（从错误修改的 0.1）
+
+### 验证结果
+
+- **12 bands (20°步长)**：12/12 生成，VALIDATION PASSED (fillet + endwall)
+- **45 bands (5°步长)**：45/45 生成，VALIDATION PASSED (fillet + endwall)
+- 叶身为连续整体（final_fillet_body），band 仅包裹在倒圆+缘板外侧
+
+### Commit
+
+```
+fix: remove blade sub-solid from bands, trapezoidal endwall face
+
+- Bands now span z=-thickness..z=r (fillet + endwall only)
+- Inner boundary uses blade angles (wider), outer uses expanded angles (narrower)
+- Endwall face is trapezoidal for roughly constant arc-length band width
+- Blade remains one continuous body (not split into bands)
+- Restore 1e-9 tolerance for segment classification
+```

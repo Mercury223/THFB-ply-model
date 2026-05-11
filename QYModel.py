@@ -90,6 +90,7 @@ class VaneBladeAndEndwallBuilder:
         "history.md",
         ".git",
         ".gitignore",
+        ".claude",
     }
 
     def __init__(self, p: Params):
@@ -1226,13 +1227,13 @@ class VaneBladeAndEndwallBuilder:
     def build_ply_band_solids(self, outer_profile):
         """为每个铺层带生成有厚度的可视化实体。
 
-        每个 band 实体 = blade 段 + fillet 段 + endwall 段，三段融合：
-          - blade  层 (z=r .. blade_height)：叶身外表面向内偏置，沿 Z 拉伸
-          - fillet 层 (z=0 .. r)：倒圆四分之一圆环截面绕 Z 轴回转 (arc bands)
-                                   或沿直线方向拉伸 (straight bands)
-          - endwall 层 (z=-thickness .. 0)：缘板顶面 2D 截面沿 -Z 拉伸
+        每个 band 实体 = fillet 段 + endwall 段，两段融合：
+          - fillet 层 (z=0 .. r)：从叶身-倒圆交界(z=r)开始，倒圆截面绕 Z 轴回转(arc)
+                                   或沿直线方向拉伸(straight)
+          - endwall 层 (z=-thickness .. 0)：梯形端壁面，内边界用叶身角度(宽)，外边界用
+                                   扩展角度(窄)，沿 -Z 拉伸，保持弧长宽度基本一致
 
-        左右边界采用 side_a / side_b 在 XY 面的投影路径。
+        叶身层不再分配到各 band 中（叶身是连续整体）。
         """
         p = self.p
         thickness = float(p.ply_layer_thickness)
@@ -1243,7 +1244,6 @@ class VaneBladeAndEndwallBuilder:
         stations = self._make_ply_station_s_values(outer_profile)
         expanded_pts, expanded_cum = self._make_expanded_polyline(outer_profile)
         expanded_total = expanded_cum[-1]
-        blade_height = float(p.blade_height)
         r = max(0.0, float(p.root_fillet_radius))
 
         # 分段信息
@@ -1292,221 +1292,101 @@ class VaneBladeAndEndwallBuilder:
             is_lower_trans = (s0 < arc_start - 1e-9 and s1 > arc_start + 1e-9)
             is_upper_trans = (s0 < arc_end - 1e-9 and s1 > arc_end + 1e-9)
 
-            # ── Blade 截面 (XY 面, s0→s1) ──
+            # ── 角度（内边界=叶身角/宽，外边界=扩展角/窄）──
+            _offset = float(p.ply_expand_offset)
+            _Rblade = float(outer_profile["radius"])
+            _θ_low = p.lower_tangent_angle_deg
+            _θ_up = p.upper_tangent_angle_deg
+            _deg = math.degrees
+
             if on_arc:
-                # 纯圆弧段：真实圆弧边
-                Rblade = float(outer_profile["radius"])
-                θ0, θ1 = self._band_arc_angles_deg(s0, s1)
-                a0r, a1r = math.radians(θ0), math.radians(θ1)
-
-                blade_outer_arc = self._make_circular_arc_edge(
-                    0, 0, Rblade, θ0, θ1)
-                blade_inner_arc = self._make_circular_arc_edge(
-                    0, 0, Rblade - thickness, θ1, θ0)
-
-                bp_start = cq.Vector(
-                    Rblade * math.cos(a0r), Rblade * math.sin(a0r), 0.0)
-                bp_end = cq.Vector(
-                    Rblade * math.cos(a1r), Rblade * math.sin(a1r), 0.0)
-                ip_start = cq.Vector(
-                    (Rblade - thickness) * math.cos(a0r),
-                    (Rblade - thickness) * math.sin(a0r), 0.0)
-                ip_end = cq.Vector(
-                    (Rblade - thickness) * math.cos(a1r),
-                    (Rblade - thickness) * math.sin(a1r), 0.0)
-
-                blade_edges = [
-                    blade_outer_arc,
-                    cq.Edge.makeLine(bp_end, ip_end),
-                    blade_inner_arc,
-                    cq.Edge.makeLine(ip_start, bp_start),
-                ]
-            elif is_lower_trans or is_upper_trans:
-                # 过渡段：拆分为直线段 + 圆弧段组合
-                Rblade = float(outer_profile["radius"])
-                if is_lower_trans:
-                    s_line = (s0, arc_start)
-                    θ_arc0 = p.lower_tangent_angle_deg
-                    _, θ_arc1 = self._band_arc_angles_deg(arc_start, s1)
-                else:
-                    s_line = (arc_end, s1)
-                    θ_arc0, _ = self._band_arc_angles_deg(s0, arc_end)
-                    θ_arc1 = p.upper_tangent_angle_deg
-
-                a0r, a1r = math.radians(θ_arc0), math.radians(θ_arc1)
-                arc_start_pt = cq.Vector(
-                    Rblade * math.cos(a0r), Rblade * math.sin(a0r), 0.0)
-                arc_end_pt = cq.Vector(
-                    Rblade * math.cos(a1r), Rblade * math.sin(a1r), 0.0)
-                ias = cq.Vector(
-                    (Rblade - thickness) * math.cos(a0r),
-                    (Rblade - thickness) * math.sin(a0r), 0.0)
-                iae = cq.Vector(
-                    (Rblade - thickness) * math.cos(a1r),
-                    (Rblade - thickness) * math.sin(a1r), 0.0)
-
-                # 直线段端点
-                pt_l0, _, n_l0 = self._outer_profile_point_tangent_normal_at_s(
-                    outer_profile, s_line[0])
-                pt_l1, _, n_l1 = self._outer_profile_point_tangent_normal_at_s(
-                    outer_profile, s_line[1])
-                il0 = cq.Vector(pt_l0.x - n_l0.x * thickness,
-                                pt_l0.y - n_l0.y * thickness, 0.0)
-                il1 = cq.Vector(pt_l1.x - n_l1.x * thickness,
-                                pt_l1.y - n_l1.y * thickness, 0.0)
-
-                outer_arc_edge = self._make_circular_arc_edge(
-                    0, 0, Rblade, θ_arc0, θ_arc1)
-                inner_arc_edge = self._make_circular_arc_edge(
-                    0, 0, Rblade - thickness, θ_arc1, θ_arc0)
-
-                if is_lower_trans:
-                    # pt_l0→arc_start_pt (straight line, pt_l1==arc_start_pt at tangent)
-                    bp_start, bp_end = pt_l0, arc_end_pt
-                    ip_start, ip_end = il0, iae
-                    blade_edges = [
-                        cq.Edge.makeLine(pt_l0, arc_start_pt),
-                        outer_arc_edge,
-                        cq.Edge.makeLine(arc_end_pt, iae),
-                        inner_arc_edge,
-                        cq.Edge.makeLine(ias, il0),
-                        cq.Edge.makeLine(il0, pt_l0),
-                    ]
-                else:
-                    # arc_start_pt→arc_end_pt (arc) → pt_l1 (straight, arc_end_pt==pt_l0)
-                    bp_start, bp_end = arc_start_pt, pt_l1
-                    ip_start, ip_end = ias, il1
-                    blade_edges = [
-                        outer_arc_edge,
-                        cq.Edge.makeLine(arc_end_pt, pt_l1),
-                        cq.Edge.makeLine(pt_l1, il1),
-                        cq.Edge.makeLine(il1, iae),
-                        inner_arc_edge,
-                        cq.Edge.makeLine(ias, arc_start_pt),
-                    ]
-            else:
-                # 纯直线段：折线采样
-                n_pts = max(4, int((s1 - s0) * 4))
-                outer_xy = []
-                inner_xy = []
-                for i in range(n_pts + 1):
-                    s = s0 + (s1 - s0) * i / n_pts
-                    pt, _, normal = self._outer_profile_point_tangent_normal_at_s(
-                        outer_profile, s)
-                    outer_xy.append(pt)
-                    inner_xy.append(cq.Vector(
-                        pt.x - normal.x * thickness,
-                        pt.y - normal.y * thickness,
-                        0.0,
-                    ))
-                bp_start = outer_xy[0]
-                bp_end = outer_xy[-1]
-                ip_start = inner_xy[0]
-                ip_end = inner_xy[-1]
-
-                blade_edges = []
-                for i in range(len(outer_xy) - 1):
-                    blade_edges.append(
-                        cq.Edge.makeLine(outer_xy[i], outer_xy[i + 1]))
-                for i in range(len(inner_xy) - 1, 0, -1):
-                    blade_edges.append(
-                        cq.Edge.makeLine(inner_xy[i], inner_xy[i - 1]))
-                blade_edges.append(cq.Edge.makeLine(bp_start, ip_start))
-                blade_edges.append(cq.Edge.makeLine(ip_end, bp_end))
-
-            # ── Build blade sub-solid (z=r .. blade_height) ──
-
-            blade_wire = cq.Wire.assembleEdges(blade_edges)
-            blade_face = cq.Face.makeFromWires(blade_wire)
-            blade_solid = (
-                cq.Workplane("XY")
-                .add(blade_face)
-                .extrude(blade_height - r)  # 从偏移起点到顶部
-                .val()
-            )
-            if r > 1e-9:
-                blade_solid = blade_solid.translate(
-                    cq.Vector(0.0, 0.0, r))  # 抬高到 z=r
+                # 内边界（叶身）角度：分母=R
+                θ_in0, θ_in1 = self._band_arc_angles_deg(s0, s1)
+                # 外边界（扩展曲线）角度：分母=R+offset
+                _out_center = _θ_low + _deg(
+                    (expanded_center_len - arc_start) / (_Rblade + _offset))
+                _out_half = 0.5 * _deg(
+                    blade_seg_len / (_Rblade + _offset))
+                θ_out0 = _out_center - _out_half
+                θ_out1 = _out_center + _out_half
+            elif is_lower_trans:
+                θ_in0 = _θ_low
+                _, θ_in1 = self._band_arc_angles_deg(arc_start, s1)
+                θ_out0 = _θ_low
+                θ_out1 = _θ_low + _deg(
+                    (s1 - arc_start) / (_Rblade + _offset))
+            elif is_upper_trans:
+                θ_in0, _ = self._band_arc_angles_deg(s0, arc_end)
+                θ_in1 = _θ_up
+                θ_out0 = _θ_up - _deg(
+                    (arc_end - s0) / (_Rblade + _offset))
+                θ_out1 = _θ_up
 
             # ── Build fillet sub-solid (z=0 .. r) ──
+            # ── 倒圆实体从叶身-倒圆交界(z=r)开始，延伸到缘板顶面(z=0) ──
             if r > 1e-9:
                 if on_arc:
                     fillet_solid = self._make_fillet_solid_arc(
                         float(outer_profile["radius"]), r, thickness,
-                        s0, s1)
+                        θ_in0, θ_in1)
                 elif on_lower_straight or on_upper_straight:
                     fillet_solid = self._make_fillet_solid_straight(
                         float(outer_profile["radius"]), r, thickness,
                         s0, s1, outer_profile)
                 else:
-                    # transition band: split at arc boundary
+                    # transition: arc portion uses blade (inner) angles
+                    if is_lower_trans:
+                        _f_arc_θ0, _f_arc_θ1 = θ_in0, θ_in1
+                    else:
+                        _f_arc_θ0, _f_arc_θ1 = θ_in0, θ_in1
                     fillet_solid = self._make_fillet_solid_transition(
                         float(outer_profile["radius"]), r, thickness,
                         s0, s1, outer_profile,
-                        arc_start, arc_end)
+                        arc_start, arc_end, _f_arc_θ0, _f_arc_θ1)
             else:
                 fillet_solid = None
 
             # ── Build endwall sub-solid (z=-thickness .. 0) ──
+            # ── 梯形端壁面：内边界(叶身角度/宽)→外边界(扩展角度/窄) ──
             if on_arc:
-                # 端壁梯形：内边界用叶片角度(宽)，外边界用等弧长角度(窄)
                 offset = float(p.ply_expand_offset)
                 Rblade = float(outer_profile["radius"])
-                θ_low = p.lower_tangent_angle_deg
 
-                ew_center_ang = θ_low + math.degrees(
-                    (expanded_center_len - arc_start) / (Rblade + offset))
-                ew_half_span = 0.5 * math.degrees(
-                    blade_seg_len / (Rblade + offset))
-                ew_θ0 = ew_center_ang - ew_half_span
-                ew_θ1 = ew_center_ang + ew_half_span
+                in_a0r, in_a1r = math.radians(θ_in0), math.radians(θ_in1)
+                out_a0r, out_a1r = math.radians(θ_out0), math.radians(θ_out1)
 
-                blade_a0r, blade_a1r = math.radians(θ0), math.radians(θ1)
-                ew_a0r, ew_a1r = math.radians(ew_θ0), math.radians(ew_θ1)
+                # 外边界点位（扩展角度）
+                q0 = cq.Vector((Rblade + offset) * math.cos(out_a0r),
+                               (Rblade + offset) * math.sin(out_a0r), 0.0)
+                q1 = cq.Vector((Rblade + offset) * math.cos(out_a1r),
+                               (Rblade + offset) * math.sin(out_a1r), 0.0)
 
-                # 精确几何位置（替代 polyline 插值）
-                q0 = cq.Vector((Rblade + offset) * math.cos(ew_a0r),
-                               (Rblade + offset) * math.sin(ew_a0r), 0.0)
-                q1 = cq.Vector((Rblade + offset) * math.cos(ew_a1r),
-                               (Rblade + offset) * math.sin(ew_a1r), 0.0)
+                # 内边界：叶身角度 (宽)
+                inner_arc = self._make_circular_arc_edge(
+                    0, 0, Rblade + r, θ_in0, θ_in1)
+                # 外边界：扩展角度 (窄)
+                outer_arc = self._make_circular_arc_edge(
+                    0, 0, Rblade + offset, θ_out1, θ_out0)
 
-                # 内边界：叶片角度，与倒圆底部匹配
-                fillet_bottom_arc = self._make_circular_arc_edge(
-                    0, 0, Rblade + r, θ0, θ1)
-                fb_start = cq.Vector((Rblade + r) * math.cos(blade_a0r),
-                                     (Rblade + r) * math.sin(blade_a0r), 0.0)
-                fb_end = cq.Vector((Rblade + r) * math.cos(blade_a1r),
-                                   (Rblade + r) * math.sin(blade_a1r), 0.0)
-
-                # 外边界：等弧长角度
-                expanded_arc = self._make_circular_arc_edge(
-                    0, 0, Rblade + offset, ew_θ1, ew_θ0)
+                fb_s0 = cq.Vector((Rblade + r) * math.cos(in_a0r),
+                                  (Rblade + r) * math.sin(in_a0r), 0.0)
+                fb_s1 = cq.Vector((Rblade + r) * math.cos(in_a1r),
+                                  (Rblade + r) * math.sin(in_a1r), 0.0)
 
                 endwall_edges = [
-                    fillet_bottom_arc,
-                    cq.Edge.makeLine(fb_end, q1),
-                    expanded_arc,
-                    cq.Edge.makeLine(q0, fb_start),
+                    inner_arc,
+                    cq.Edge.makeLine(fb_s1, q1),
+                    outer_arc,
+                    cq.Edge.makeLine(q0, fb_s0),
                 ]
             elif is_lower_trans or is_upper_trans:
-                # 过渡段：端壁轮廓 = 直线段 + 圆弧段组合
                 offset = float(p.ply_expand_offset)
                 Rblade = float(outer_profile["radius"])
+                in_a0r, in_a1r = math.radians(θ_in0), math.radians(θ_in1)
+                out_a0r, out_a1r = math.radians(θ_out0), math.radians(θ_out1)
 
                 if is_lower_trans:
-                    θ_low = p.lower_tangent_angle_deg
-                    _, θ_s1 = self._band_arc_angles_deg(arc_start, s1)
-                    # inner: line(s0→arc_start) + arc(θ_low→θ_s1)
-                    # outer: line(exp_s0→exp_as) + arc(θ_s1→θ_low)
-                    a_low_r = math.radians(θ_low)
-                    a_s1_r = math.radians(θ_s1)
-
-                    fb_arc = self._make_circular_arc_edge(
-                        0, 0, Rblade + r, θ_low, θ_s1)
-                    exp_arc = self._make_circular_arc_edge(
-                        0, 0, Rblade + offset, θ_s1, θ_low)
-
-                    # 直线段端点 (inner at R+r)
+                    # Inner: straight(s0→as) + arc(as→s1, blade angles)
                     pt_s0, _, n_s0 = self._outer_profile_point_tangent_normal_at_s(
                         outer_profile, s0)
                     pt_as, _, n_as = self._outer_profile_point_tangent_normal_at_s(
@@ -1516,37 +1396,33 @@ class VaneBladeAndEndwallBuilder:
                     fb_as = cq.Vector(pt_as.x + n_as.x * r,
                                       pt_as.y + n_as.y * r, 0.0)
 
-                    # 直线段端点 (outer at R+offset) — 用几何精确位置
-                    eq_as = cq.Vector(
-                        (Rblade + offset) * math.cos(a_low_r),
-                        (Rblade + offset) * math.sin(a_low_r), 0.0)
+                    inner_arc = self._make_circular_arc_edge(
+                        0, 0, Rblade + r, θ_in0, θ_in1)
 
-                    fb_s1 = cq.Vector((Rblade + r) * math.cos(a_s1_r),
-                                      (Rblade + r) * math.sin(a_s1_r), 0.0)
-                    eq_s1 = cq.Vector((Rblade + offset) * math.cos(a_s1_r),
-                                      (Rblade + offset) * math.sin(a_s1_r), 0.0)
+                    # Outer: polyline(q0→exp_as) + arc(exp_as→q1, expanded angles)
+                    eq_as = cq.Vector((Rblade + offset) * math.cos(out_a0r),
+                                      (Rblade + offset) * math.sin(out_a0r), 0.0)
+                    outer_arc = self._make_circular_arc_edge(
+                        0, 0, Rblade + offset, θ_out1, θ_out0)
+
+                    fb_s1 = cq.Vector((Rblade + r) * math.cos(in_a1r),
+                                      (Rblade + r) * math.sin(in_a1r), 0.0)
+                    eq_s1 = cq.Vector((Rblade + offset) * math.cos(out_a1r),
+                                      (Rblade + offset) * math.sin(out_a1r), 0.0)
 
                     endwall_edges = [
-                        cq.Edge.makeLine(fb_s0, fb_as),     # inner straight
-                        fb_arc,                              # inner arc
-                        cq.Edge.makeLine(fb_s1, eq_s1),     # side b
-                        exp_arc,                             # outer arc (rev)
-                        cq.Edge.makeLine(eq_as, q0),        # outer straight (rev)
-                        cq.Edge.makeLine(q0, fb_s0),        # side a
+                        cq.Edge.makeLine(fb_s0, fb_as),
+                        inner_arc,
+                        cq.Edge.makeLine(fb_s1, eq_s1),
+                        outer_arc,
+                        cq.Edge.makeLine(eq_as, q0),
+                        cq.Edge.makeLine(q0, fb_s0),
                     ]
                 else:
-                    # upper transition: arc(s0→arc_end) + line(arc_end→s1)
-                    θ_s0, _ = self._band_arc_angles_deg(s0, arc_end)
-                    θ_up = p.upper_tangent_angle_deg
-                    a_s0_r = math.radians(θ_s0)
-                    a_up_r = math.radians(θ_up)
+                    # Inner: arc(s0→ae, blade angles) + straight(ae→s1)
+                    inner_arc = self._make_circular_arc_edge(
+                        0, 0, Rblade + r, θ_in0, θ_in1)
 
-                    fb_arc = self._make_circular_arc_edge(
-                        0, 0, Rblade + r, θ_s0, θ_up)
-                    exp_arc = self._make_circular_arc_edge(
-                        0, 0, Rblade + offset, θ_up, θ_s0)
-
-                    # 直线段端点 (inner at R+r)
                     pt_ae, _, n_ae = self._outer_profile_point_tangent_normal_at_s(
                         outer_profile, arc_end)
                     pt_s1, _, n_s1 = self._outer_profile_point_tangent_normal_at_s(
@@ -1556,35 +1432,35 @@ class VaneBladeAndEndwallBuilder:
                     fb_s1 = cq.Vector(pt_s1.x + n_s1.x * r,
                                       pt_s1.y + n_s1.y * r, 0.0)
 
-                    # 直线段端点 (outer at R+offset) — 用几何精确位置
-                    eq_ae = cq.Vector(
-                        (Rblade + offset) * math.cos(a_up_r),
-                        (Rblade + offset) * math.sin(a_up_r), 0.0)
+                    # Outer: arc(q0→exp_ae, expanded angles) + polyline(exp_ae→q1)
+                    outer_arc = self._make_circular_arc_edge(
+                        0, 0, Rblade + offset, θ_out1, θ_out0)
 
-                    fb_s0 = cq.Vector((Rblade + r) * math.cos(a_s0_r),
-                                      (Rblade + r) * math.sin(a_s0_r), 0.0)
-                    eq_s0 = cq.Vector((Rblade + offset) * math.cos(a_s0_r),
-                                      (Rblade + offset) * math.sin(a_s0_r), 0.0)
+                    eq_ae = cq.Vector((Rblade + offset) * math.cos(out_a1r),
+                                      (Rblade + offset) * math.sin(out_a1r), 0.0)
+                    fb_s0 = cq.Vector((Rblade + r) * math.cos(in_a0r),
+                                      (Rblade + r) * math.sin(in_a0r), 0.0)
+                    eq_s0 = cq.Vector((Rblade + offset) * math.cos(out_a0r),
+                                      (Rblade + offset) * math.sin(out_a0r), 0.0)
 
                     endwall_edges = [
-                        fb_arc,                              # inner arc
-                        cq.Edge.makeLine(fb_ae, fb_s1),     # inner straight
-                        cq.Edge.makeLine(fb_s1, q1),        # side b
-                        cq.Edge.makeLine(q1, eq_ae),        # outer straight (rev)
-                        exp_arc,                             # outer arc (rev)
-                        cq.Edge.makeLine(eq_s0, fb_s0),     # side a
+                        inner_arc,
+                        cq.Edge.makeLine(fb_ae, fb_s1),
+                        cq.Edge.makeLine(fb_s1, q1),
+                        cq.Edge.makeLine(q1, eq_ae),
+                        outer_arc,
+                        cq.Edge.makeLine(eq_s0, fb_s0),
                     ]
             else:
                 # 纯直线段：折线采样
                 exp_bottom_n = max(4, int(abs(q1_len - q0_len) * 0.3))
                 exp_seg_xy = []
                 for i in range(exp_bottom_n + 1):
-                    t = q0_len if exp_bottom_n == 0 else (
+                    t_val = q0_len if exp_bottom_n == 0 else (
                         q0_len + (q1_len - q0_len) * i / exp_bottom_n)
-                    pt = self._interp_polyline_at_length(expanded_pts, expanded_cum, t)
+                    pt = self._interp_polyline_at_length(expanded_pts, expanded_cum, t_val)
                     exp_seg_xy.append(pt)
 
-                # 直线段端壁轮廓：从 ew_start (R+r) 开始
                 endwall_edges = [
                     cq.Edge.makeLine(ew_start0, ew_start1),
                     cq.Edge.makeLine(ew_start1, exp_seg_xy[-1]),
@@ -1604,11 +1480,11 @@ class VaneBladeAndEndwallBuilder:
                     .extrude(-thickness)
                     .val()
                 )
-                # 融合三段
-                band_solid = blade_solid
+                # 融合：仅 fillet + endwall（无 blade 段）
                 if fillet_solid is not None:
-                    band_solid = band_solid.fuse(fillet_solid)
-                band_solid = band_solid.fuse(endwall_solid)
+                    band_solid = fillet_solid.fuse(endwall_solid)
+                else:
+                    band_solid = endwall_solid
 
                 if not band_solid.isValid():
                     raise RuntimeError("Fused solid not valid")
@@ -1629,12 +1505,11 @@ class VaneBladeAndEndwallBuilder:
         return solids
 
     def _validate_band_solids(self, solids, outer_profile):
-        """自检: 验证每个 band solid 在 blade / fillet / endwall 区域都有材料.
+        """自检: 验证每个 band solid 在 fillet / endwall 区域都有材料.
 
         测试点选取:
-          - blade:  mid-band 处, r=R-t/2, z=blade_h*0.7
           - fillet: mid-band 处, 内外弧中点, z=mid-angle 高度
-          - endwall: mid-band 处, r=R+r/2, z=-t/2
+          - endwall: mid-band 处, 端壁中间深度
         方向向量使用 band 中点处的实际外法向 (pt_m/normal).
         """
         from OCP.BRepClass3d import BRepClass3d_SolidClassifier
@@ -1642,10 +1517,8 @@ class VaneBladeAndEndwallBuilder:
         from OCP.TopAbs import TopAbs_IN
 
         p = self.p
-        R = float(p.outer_radius)
         r = float(p.root_fillet_radius)
         t = float(p.ply_layer_thickness)
-        blade_h = float(p.blade_height)
         stations = self._make_ply_station_s_values(outer_profile)
 
         errors = []
@@ -1670,27 +1543,20 @@ class VaneBladeAndEndwallBuilder:
                 c.Perform(gp_Pnt(pt.x, pt.y, pt.z), 1e-3)
                 return c.State() == TopAbs_IN
 
-            # Blade: 向内 (opposite normal) t/2, 在 blade 中上部
-            if not point_inside(-t * 0.5, blade_h * 0.7):
-                errors.append(f"band {idx}: blade region empty")
-
-            # Fillet: 内外弧中点 (mid-angle φ=45°, 厚度方向中间)
+            # Fillet: XZ 轮廓中点 (dist=2.5 from center(35,2), angle=225°)
+            # 径向偏置 ≈ r*(1-cos45°)≈0.586, z≈r*(1-sin45°)≈0.586
             if r > 1e-9:
                 phi = math.pi / 4.0
-                outer_off = r * (1.0 - math.cos(phi))   # ≈ 0.586 for r=2
-                outer_z = r * (1.0 - math.sin(phi))
-                inner_off_offset = -(t * math.cos(phi))  # 内弧相对外弧的偏移差
-                inner_z_offset = -t * math.sin(phi)
-                fil_off = outer_off + inner_off_offset * 0.5
-                fil_z = outer_z + inner_z_offset * 0.5
-                if fil_off < -t * 0.9:
-                    fil_off = r * 0.3
-                    fil_z = r * 0.3
-                if not point_inside(fil_off, fil_z):
+                fil_r = r * (1.0 - math.cos(phi))
+                fil_z = r * (1.0 - math.sin(phi))
+                # 厚度中间：径向向内偏 t*cos(phi)/2 ≈ t*0.35
+                fil_r -= t * math.cos(phi) * 0.5
+                fil_z -= t * math.sin(phi) * 0.5
+                if not point_inside(fil_r, fil_z):
                     errors.append(f"band {idx}: fillet region empty")
 
-            # Endwall: 沿 normal 方向 r/2, z=-t/2 (endwall 中间深度)
-            if not point_inside(r * 0.5, -t * 0.5):
+            # Endwall: 在端壁中间深度 (R+r + offset*0.3 处)
+            if not point_inside(r + (p.ply_expand_offset - r) * 0.3, -t * 0.5):
                 errors.append(f"band {idx}: endwall region empty")
 
         if errors:
@@ -1699,7 +1565,7 @@ class VaneBladeAndEndwallBuilder:
                 print(f"  - {e}")
         else:
             print(f"[VALIDATION PASSED] all {len(solids)} bands OK"
-                  f" (blade + fillet + endwall)")
+                  f" (fillet + endwall)")
 
     # ── Fillet solid helpers ──
 
@@ -1716,7 +1582,7 @@ class VaneBladeAndEndwallBuilder:
         θ1 = p.lower_tangent_angle_deg + (s_arc1 / arc_len) * arc_angle_span
         return θ0, θ1
 
-    def _make_fillet_solid_arc(self, R, r, thickness, s0, s1):
+    def _make_fillet_solid_arc(self, R, r, thickness, angle0_deg, angle1_deg):
         """Arc bands 倒圆实体: 四分之一圆环截面绕 Z 轴回转.
 
         截面构建 (XZ 面):
@@ -1731,7 +1597,7 @@ class VaneBladeAndEndwallBuilder:
         sqrt2 = _math.sqrt(2.0)
         t = float(thickness)
 
-        θ0, θ1 = self._band_arc_angles_deg(s0, s1)
+        θ0, θ1 = float(angle0_deg), float(angle1_deg)
         span = θ1 - θ0
         if span < 0.01:
             return None
@@ -1832,7 +1698,8 @@ class VaneBladeAndEndwallBuilder:
             return None
 
     def _make_fillet_solid_transition(self, R, r, thickness, s0, s1,
-                                       outer_profile, arc_s, arc_e):
+                                       outer_profile, arc_s, arc_e,
+                                       arc_angle0, arc_angle1):
         """Transition band: split into straight + arc sub-bands."""
         t = float(thickness)
 
@@ -1853,7 +1720,8 @@ class VaneBladeAndEndwallBuilder:
             if sb - sa < 0.01:
                 continue
             if is_arc:
-                sub = self._make_fillet_solid_arc(R, r, t, sa, sb)
+                sub = self._make_fillet_solid_arc(
+                    R, r, t, arc_angle0, arc_angle1)
             else:
                 sub = self._make_fillet_solid_straight(
                     R, r, t, sa, sb, outer_profile)
