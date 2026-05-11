@@ -1070,7 +1070,9 @@ class VaneBladeAndEndwallBuilder:
 
     def _connector_polyline_pts(self, root_xy, end_xy, normal_xy):
         """返回翻折路径的有序点列表 (top → bottom):
-        blade 顶面 → 竖向段 → 倒圆段 → 缘板顶面 → 扩展曲线端点。
+        blade 顶面 → 叶身-倒圆交界(z=r) → 直接到扩展曲线端点(z=0)。
+
+        side_a/side_b 分叉点位于叶身-倒圆交界 (z=r, R)，而非倒圆-缘板交界 (z=0, R+r)。
         """
         p = self.p
         r = max(0.0, float(p.root_fillet_radius))
@@ -1081,27 +1083,7 @@ class VaneBladeAndEndwallBuilder:
 
         if r > 1e-9:
             pts.append(self._v3(root_xy, r))
-            n = max(3, int(p.ply_fillet_samples))
-            for i in range(1, n + 1):
-                theta = 0.5 * math.pi * i / n
-                radial = r * (1.0 - math.cos(theta))
-                z = r * (1.0 - math.sin(theta))
-                q = cq.Vector(
-                    root_xy.x + normal_xy.x * radial,
-                    root_xy.y + normal_xy.y * radial,
-                    0.0,
-                )
-                pts.append(self._v3(q, z))
-            endwall_start = cq.Vector(
-                root_xy.x + normal_xy.x * r,
-                root_xy.y + normal_xy.y * r,
-                0.0,
-            )
-        else:
-            pts.append(self._v3(root_xy, 0.0))
-            endwall_start = root_xy
 
-        pts.append(self._v3(endwall_start, 0.0))
         pts.append(self._v3(end_xy, 0.0))
         return pts
 

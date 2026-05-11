@@ -337,3 +337,39 @@ fix: compute transition band outer angles from expanded curve positions
 - Handle all-arc outer boundary case when q positions fall in arc region
 - Endwall outer boundary adapts to all-arc or polyline+arc based on q position
 ```
+
+---
+
+## 13. 参考线分叉点修正：从倒圆-缘板交界移到叶身-倒圆交界 (2026-05-11)
+
+### 问题
+
+side_a / side_b 参考线的分叉点位于倒圆-缘板交界 (z=0, 半径 R+r)，xy 位置在倒圆曲线上（叶身向外扩充 R）。
+
+正确位置应在叶身-倒圆交界 (z=r, 半径 R)，xy 位置在叶身曲线上。
+
+**根因**：`_connector_polyline_pts` 中，side_a/side_b 参考线先沿倒圆曲面走到 z=0 再分别指向各自的扩展曲线端点。两条线在 z=0 之前完全相同，分叉点位于倒圆底部 (R+r)。
+
+### 修复
+
+**`_connector_polyline_pts`**：移除沿倒圆曲面的路径段。参考线路径改为：
+```
+blade 顶面 → 叶身-倒圆交界(z=r) → 直接到扩展曲线端点(z=0)
+```
+两条相邻 band 的 side_a/side_b 从 z=r 开始分别指向各自的扩展曲线端点 (q0_{i+1} ≠ q1_i)，分叉点位于叶身曲线上的 (R, θ(s), r)。
+
+### 验证
+
+- 分叉点 xy 坐标位于叶身外廓曲线 (R=33)，而非倒圆曲线 (R+r=35)
+- **12 bands (20°)**：12/12，VALIDATION PASSED
+- **45 bands (5°)**：45/45，VALIDATION PASSED
+
+### Commit
+
+```
+fix: connector wire bifurcation at z=r on blade curve, not z=0 on fillet curve
+
+- _connector_polyline_pts now goes directly from z=r to expanded endpoint
+- side_a/side_b diverge at blade-fillet junction (z=r, radius R)
+- No longer follows fillet quarter-circle to z=0 before diverging
+```
