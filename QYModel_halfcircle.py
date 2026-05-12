@@ -113,41 +113,64 @@ def connector_wire(theta_center_deg, sign):
     return make_polyline_edge(pts)
 
 
-def rho_inner_at_z(z):
-    """Inner quarter-circle radius at height z (fillet region)."""
-    if z >= R_fillet - 1e-9:
-        return r_blade - t
-    if z <= 0.0:
-        rr = R_fillet + t
-        sin_phi = R_fillet / rr
-        cos_phi = math.sqrt(max(0, 1.0 - sin_phi ** 2))
-        return (r_blade + R_fillet) - rr * cos_phi
-    rr = R_fillet + t
-    sin_phi = (R_fillet - z) / rr
-    if sin_phi > 1.0:
-        sin_phi = 1.0
-    cos_phi = math.sqrt(max(0, 1.0 - sin_phi ** 2))
-    return (r_blade + R_fillet) - rr * cos_phi
+def make_fillet_revolve(angle0_deg, angle1_deg):
+    """Revolve quarter-ring around Z — smooth fillet solid (QYModel approach)."""
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeRevol
+    from OCP.gp import gp_Ax1, gp_Pnt, gp_Dir
+
+    θ0, θ1 = float(angle0_deg), float(angle1_deg)
+    span = θ1 - θ0
+    if span < 0.01:
+        return None
+
+    sqrt2 = math.sqrt(2.0)
+    r_outer = float(R_fillet)
+    r_inner = r_outer + t
+    cx, cz = r_blade + r_outer, r_outer
+
+    profile_wp = (
+        cq.Workplane("XZ")
+        .moveTo(r_blade, r_outer)
+        .threePointArc((cx - r_outer / sqrt2, cz - r_outer / sqrt2),
+                       (r_blade + r_outer, 0.0))
+        .lineTo(r_blade + r_outer, -t)
+        .threePointArc((cx - r_inner / sqrt2, cz - r_inner / sqrt2),
+                       (r_blade - t, r_outer))
+        .close()
+    )
+    try:
+        face = cq.Face.makeFromWires(profile_wp.val())
+    except Exception:
+        return None
+
+    axis = gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1))
+    revol = BRepPrimAPI_MakeRevol(face.wrapped, axis, math.radians(span))
+    revol.Build()
+    solid = cq.Solid(revol.Shape())
+    if abs(θ0) > 1e-9:
+        solid = solid.rotate((0, 0, 0), (0, 0, 1), θ0)
+    return solid
 
 
 def band_solid(θ_c_deg, θ_in0_deg, θ_in1_deg, θ_out0_deg, θ_out1_deg):
-    """Three-layer band solid with spiral side faces.
+    """Three-layer band solid with split at z=R_fillet.
 
-    - Blade layer: 2D face extruded +Z (blade angles, radial sides)
-    - Fillet layer: ThruSections loft with matched closed wires,
-        side angles spiral from blade (z=R) to fillet-bottom spiral (z=0)
-    - Endwall layer: 2D trapezoid extruded -Z
-        (inner=spiral at ρ=r+R, outer=spiral at ρ=r+R+off)
+    - Blade: extrude +Z, blade angles (wide), radial sides
+    - Fillet: BRepPrimAPI_MakeRevol, spiral angles at fillet-bottom (narrow)
+      → split starts at z=R_fillet (blade wide vs fillet narrow)
+    - Endwall: extrude -Z, trapezoid (inner=spiral@ρ=r+R, outer=spiral@ρ=r+R+off)
+      → continuous with fillet at z=0 (same spiral angles)
     """
-    from OCP.BRepOffsetAPI import BRepOffsetAPI_ThruSections
-
-    N_ARC = 21
+    half_C = C / 2.0
     θ_c = math.radians(float(θ_c_deg))
     θ_in0 = float(θ_in0_deg)
     θ_in1 = float(θ_in1_deg)
     θ_out0 = float(θ_out0_deg)
     θ_out1 = float(θ_out1_deg)
-    half_C = C / 2.0
+
+    # Spiral angles at fillet bottom (ρ=r+R=35) — used for fillet span & endwall inner
+    θ_fb0 = math.degrees(θ_c - half_C / (r_blade + R_fillet))
+    θ_fb1 = math.degrees(θ_c + half_C / (r_blade + R_fillet))
 
     # ── Blade sub-solid (z=R_fillet .. blade_height) ──
     a0r, a1r = math.radians(θ_in0), math.radians(θ_in1)
@@ -165,81 +188,20 @@ def band_solid(θ_c_deg, θ_in0_deg, θ_in1_deg, θ_out0_deg, θ_out1_deg):
         BLADE_HEIGHT - R_fillet).val()
     blade_solid = blade_solid.translate(cq.Vector(0, 0, R_fillet))
 
-    # ── Fillet sub-solid: ThruSections from z=R_fillet to z=0 ──
-    fillet_solid = None
+    # ── Fillet sub-solid: BRepPrimAPI_MakeRevol (smooth, no facets) ──
     if R_fillet > 1e-9:
-        # Spiral outer angles at fillet bottom (ρ=r+R)
-        θ_fo0 = math.degrees(θ_c - half_C / (r_blade + R_fillet))
-        θ_fo1 = math.degrees(θ_c + half_C / (r_blade + R_fillet))
+        fillet_solid = make_fillet_revolve(θ_fb0, θ_fb1)
+    else:
+        fillet_solid = None
 
-        n_f = N_SAMPLES // 2
-        wires = []
-        for i in range(n_f):
-            frac = i / (n_f - 1) if n_f > 1 else 0  # 0(z=R)→1(z=0)
-            z = R_fillet * (1.0 - frac)
-            rho_out = r_blade + R_fillet * frac
-            z = z_fillet(rho_out) if frac > 0 else R_fillet
-            rho_in = rho_inner_at_z(z)
-
-            # Side angles interpolate blade→fillet_spiral
-            sA_out = θ_in0 + (θ_fo0 - θ_in0) * frac
-            sB_out = θ_in1 + (θ_fo1 - θ_in1) * frac
-
-            # Build closed wire: inner arc → sideB → outer arc → sideA
-            edges = []
-            # Inner arc (blade angles, constant)
-            pts_in = [cq.Vector(rho_in * math.cos(math.radians(a)),
-                                rho_in * math.sin(math.radians(a)), z)
-                      for a in (θ_in0 + (θ_in1 - θ_in0) * j / (N_ARC - 1)
-                                for j in range(N_ARC))]
-            for j in range(N_ARC - 1):
-                edges.append(cq.Edge.makeLine(pts_in[j], pts_in[j + 1]))
-
-            # Side B
-            edges.append(cq.Edge.makeLine(
-                cq.Vector(rho_in * math.cos(math.radians(θ_in1)),
-                          rho_in * math.sin(math.radians(θ_in1)), z),
-                cq.Vector(rho_out * math.cos(math.radians(sB_out)),
-                          rho_out * math.sin(math.radians(sB_out)), z)))
-
-            # Outer arc (spiral angles, reversed for CCW)
-            pts_out = [cq.Vector(rho_out * math.cos(math.radians(a)),
-                                 rho_out * math.sin(math.radians(a)), z)
-                       for a in (sB_out + (sA_out - sB_out) * j / (N_ARC - 1)
-                                 for j in range(N_ARC))]
-            for j in range(N_ARC - 1):
-                edges.append(cq.Edge.makeLine(pts_out[j], pts_out[j + 1]))
-
-            # Side A
-            edges.append(cq.Edge.makeLine(
-                cq.Vector(rho_out * math.cos(math.radians(sA_out)),
-                          rho_out * math.sin(math.radians(sA_out)), z),
-                cq.Vector(rho_in * math.cos(math.radians(θ_in0)),
-                          rho_in * math.sin(math.radians(θ_in0)), z)))
-
-            wires.append(cq.Wire.assembleEdges(edges))
-
-        if len(wires) >= 2:
-            try:
-                loft = BRepOffsetAPI_ThruSections(True, False, 1e-4)
-                for w in wires:
-                    loft.AddWire(w.wrapped)
-                loft.Build()
-                fillet_solid = cq.Solid(loft.Shape())
-            except Exception:
-                fillet_solid = None
-
-    # ── Endwall sub-solid (z=-t .. 0) ──
+    # ── Endwall sub-solid: extrude trapezoid downward ──
     Rinner = r_blade + R_fillet
     Router = r_blade + R_fillet + off
-    # Inner: spiral at ρ=r+R
-    θ_ei0 = math.degrees(θ_c - half_C / Rinner)
-    θ_ei1 = math.degrees(θ_c + half_C / Rinner)
 
-    in_a0r, in_a1r = math.radians(θ_ei0), math.radians(θ_ei1)
+    in_a0r, in_a1r = math.radians(θ_fb0), math.radians(θ_fb1)
     out_a0r, out_a1r = math.radians(θ_out0), math.radians(θ_out1)
 
-    inner_arc = make_arc_edge_z(Rinner, θ_ei0, θ_ei1, 0)
+    inner_arc = make_arc_edge_z(Rinner, θ_fb0, θ_fb1, 0)
     outer_arc = make_arc_edge_z(Router, θ_out1, θ_out0, 0)
     fb_s0 = cq.Vector(Rinner * math.cos(in_a0r), Rinner * math.sin(in_a0r), 0)
     fb_s1 = cq.Vector(Rinner * math.cos(in_a1r), Rinner * math.sin(in_a1r), 0)
@@ -252,7 +214,7 @@ def band_solid(θ_c_deg, θ_in0_deg, θ_in1_deg, θ_out0_deg, θ_out1_deg):
     endwall_face = cq.Face.makeFromWires(endwall_wire)
     endwall_solid = cq.Workplane("XY").add(endwall_face).extrude(-t).val()
 
-    # ── Fuse ──
+    # ── Fuse: blade + fillet + endwall ──
     band = blade_solid
     if fillet_solid is not None and fillet_solid.isValid():
         band = band.fuse(fillet_solid)
