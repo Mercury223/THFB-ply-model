@@ -74,28 +74,24 @@ def z_fillet(rho):
 
 
 def connector_wire(theta_center_deg, sign):
-    """Build symmetric spiral connector wire.
+    """Build spiral connector wire for one side of a band.
 
     sign = -1 for side_a (left), +1 for side_b (right).
     θ(ρ) = θ_center + sign × C/(2ρ)
-    At ρ=r_blade: θ = θ_center + sign × C/(2r) = band endpoint on inner circle.
 
-    Path: blade top → blade-fillet(z=R) → fillet spiral → endwall(z=0) → drop(z=-t)
+    Wire goes from blade-fillet junction (ρ=r, z=R) to expanded curve (ρ=r+R+off, z=0).
+    No blade top segment, no endwall bottom drop.
     """
     θ_c = math.radians(theta_center_deg)
     half_C = C / 2.0
-
-    # Blade junction angle
-    θ_junction = θ_c + sign * half_C / r_blade
     pts = []
 
-    # 1) Blade vertical segment
-    pts.append(v3(r_blade * math.cos(θ_junction),
-                  r_blade * math.sin(θ_junction), BLADE_HEIGHT))
-    pts.append(v3(r_blade * math.cos(θ_junction),
-                  r_blade * math.sin(θ_junction), R_fillet))
+    # Start at blade-fillet junction
+    θ_start = θ_c + sign * half_C / r_blade
+    pts.append(v3(r_blade * math.cos(θ_start),
+                  r_blade * math.sin(θ_start), R_fillet))
 
-    # 2) Fillet spiral: ρ ∈ [r_blade, r_blade + R_fillet]
+    # Fillet spiral: ρ ∈ [r_blade, r_blade+R_fillet]
     n_fillet = N_SAMPLES // 2
     for i in range(1, n_fillet + 1):
         rho = r_blade + R_fillet * i / n_fillet
@@ -103,32 +99,27 @@ def connector_wire(theta_center_deg, sign):
         z = z_fillet(rho)
         pts.append(v3(rho * math.cos(theta), rho * math.sin(theta), z))
 
-    # 3) Endwall top: ρ ∈ [r_blade+R_fillet, r_blade+R_fillet+off], z=0
+    # Endwall top: ρ ∈ [r_blade+R_fillet, r_blade+R_fillet+off], z=0
     n_endwall = N_SAMPLES // 2
     for i in range(1, n_endwall + 1):
         rho = (r_blade + R_fillet) + off * i / n_endwall
         theta = θ_c + sign * half_C / rho
         pts.append(v3(rho * math.cos(theta), rho * math.sin(theta), 0.0))
 
-    # 4) Drop to endwall bottom
-    rho_end = r_blade + R_fillet + off
-    theta_end = θ_c + sign * half_C / rho_end
-    pts.append(v3(rho_end * math.cos(theta_end), rho_end * math.sin(theta_end), -t))
-
     return make_polyline_edge(pts)
 
 
 def band_surface(theta_center_deg):
-    """Create band surface from symmetric spiral boundaries.
+    """Create band surface: loft arcs from blade-fillet junction to expanded curve.
 
-    Loft arc edges at multiple ρ levels through fillet and endwall.
+    Boundary curves: side_a + blade_arc(z=R) + side_b + expanded_arc(z=0).
     """
     from OCP.BRepOffsetAPI import BRepOffsetAPI_ThruSections
 
     θ_c = math.radians(theta_center_deg)
     half_C = C / 2.0
 
-    # ρ sampling: fillet (r→r+R) + endwall top (r+R→r+R+off) + endwall bottom
+    # ρ sampling: r → r+R (fillet) → r+R+off (endwall top)
     rhos = []
     n_f = N_SAMPLES // 2
     for i in range(n_f + 1):
@@ -136,36 +127,29 @@ def band_surface(theta_center_deg):
     n_e = N_SAMPLES // 4
     for i in range(1, n_e + 1):
         rhos.append(r_blade + R_fillet + off * i / n_e)
-    # Add endpoint
     rhos.append(r_blade + R_fillet + off)
 
     edges = []
     for rho in rhos:
         θ_a = θ_c - half_C / rho
         θ_b = θ_c + half_C / rho
-        # z height
         if rho <= r_blade + R_fillet:
             z = z_fillet(rho)
-        elif rho < r_blade + R_fillet + off:
-            z = 0.0
         else:
-            z = -t
-
-        # Arc from θ_a to θ_b at radius rho, height z
+            z = 0.0
+        # Arc at radius rho, height z
         arc = make_arc_edge_z(rho, math.degrees(θ_a), math.degrees(θ_b), z)
         edges.append(arc)
 
     if len(edges) < 2:
         return None
-
     try:
         loft = BRepOffsetAPI_ThruSections(False, False, 1e-4)
         for e in edges:
             loft.AddWire(cq.Wire.assembleEdges([e]).wrapped)
         loft.Build()
         return cq.Face(loft.Shape())
-    except Exception as e:
-        print(f"    loft failed: {e}")
+    except Exception:
         return None
 
 
@@ -197,9 +181,10 @@ band_centers_deg = [
     for i in range(N_BANDS)
 ]
 
-# 1) Station wires (radial: θ fixed at station angle)
+# 1) Station wires (radial: θ fixed, from blade-fillet z=R to expanded z=0)
 for idx, ang in enumerate(station_angles_deg):
     curves[f"ply_station_{idx:04d}"] = connector_wire(ang, 0)
+    # Also save blade-fillet junction points for top arc
     print(f"  station {idx}: blade θ={ang:.1f}° (radial)")
 
 # 2) Band curves
@@ -212,15 +197,15 @@ for idx in range(N_BANDS):
     θ0 = station_angles_deg[idx]  # band start on blade
     θ1 = station_angles_deg[idx + 1]  # band end on blade
 
-    # Blade equal-arc segment
-    blade_arc = make_arc_edge(0, 0, r_blade, θ0, θ1)
-    curves[f"ply_band_{idx:04d}_blade_equal_arc"] = blade_arc
+    # Blade equal-arc at z=R_fillet (blade-fillet junction, "向上平移")
+    blade_arc_zR = make_arc_edge_z(r_blade, θ0, θ1, R_fillet)
+    curves[f"ply_band_{idx:04d}_blade_equal_arc"] = blade_arc_zR
 
-    # Expanded equal-arc: both endpoints spiral
+    # Expanded equal-arc at z=0 (endwall top)
     θ_a_exp = θ_c - half_C_at_end_deg
     θ_b_exp = θ_c + half_C_at_end_deg
-    expanded_arc = make_arc_edge(0, 0, ρ_end, θ_a_exp, θ_b_exp)
-    curves[f"ply_band_{idx:04d}_expanded_equal_arc"] = expanded_arc
+    expanded_arc_z0 = make_arc_edge_z(ρ_end, θ_a_exp, θ_b_exp, 0.0)
+    curves[f"ply_band_{idx:04d}_expanded_equal_arc"] = expanded_arc_z0
 
     # Side A: θ(ρ) = θ_c - C/(2ρ)  (sign=-1)
     curves[f"ply_band_{idx:04d}_side_a"] = connector_wire(θ_c, -1)
