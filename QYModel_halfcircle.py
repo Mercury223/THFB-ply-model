@@ -79,19 +79,23 @@ def connector_wire(theta_center_deg, sign):
     sign = -1 for side_a (left), +1 for side_b (right).
     θ(ρ) = θ_center + sign × C/(2ρ)
 
-    Wire goes from blade-fillet junction (ρ=r, z=R) to expanded curve (ρ=r+R+off, z=0).
-    No blade top segment, no endwall bottom drop.
+    Wire: blade top(z=blade_height) → blade-fillet(z=R) → fillet spiral
+          → endwall top(z=0). No endwall bottom drop.
     """
     θ_c = math.radians(theta_center_deg)
     half_C = C / 2.0
     pts = []
 
-    # Start at blade-fillet junction
-    θ_start = θ_c + sign * half_C / r_blade
-    pts.append(v3(r_blade * math.cos(θ_start),
-                  r_blade * math.sin(θ_start), R_fillet))
+    # Blade junction angle
+    θ_junction = θ_c + sign * half_C / r_blade
 
-    # Fillet spiral: ρ ∈ [r_blade, r_blade+R_fillet]
+    # 1) Blade top → blade-fillet junction (vertical at ρ=r_blade)
+    pts.append(v3(r_blade * math.cos(θ_junction),
+                  r_blade * math.sin(θ_junction), BLADE_HEIGHT))
+    pts.append(v3(r_blade * math.cos(θ_junction),
+                  r_blade * math.sin(θ_junction), R_fillet))
+
+    # 2) Fillet spiral: ρ ∈ [r_blade, r_blade+R_fillet]
     n_fillet = N_SAMPLES // 2
     for i in range(1, n_fillet + 1):
         rho = r_blade + R_fillet * i / n_fillet
@@ -99,7 +103,7 @@ def connector_wire(theta_center_deg, sign):
         z = z_fillet(rho)
         pts.append(v3(rho * math.cos(theta), rho * math.sin(theta), z))
 
-    # Endwall top: ρ ∈ [r_blade+R_fillet, r_blade+R_fillet+off], z=0
+    # 3) Endwall top: ρ ∈ [r_blade+R_fillet, r_blade+R_fillet+off], z=0
     n_endwall = N_SAMPLES // 2
     for i in range(1, n_endwall + 1):
         rho = (r_blade + R_fillet) + off * i / n_endwall
@@ -119,25 +123,32 @@ def band_surface(theta_center_deg):
     θ_c = math.radians(theta_center_deg)
     half_C = C / 2.0
 
-    # ρ sampling: r → r+R (fillet) → r+R+off (endwall top)
-    rhos = []
+    # ρ/z sampling: blade (ρ=r, z=blade_height→R) + fillet (ρ=r→r+R) + endwall (ρ=r+R→r+R+off)
+    rhos_and_zs = []
+
+    # Blade portion: ρ=r_blade, z from blade_height down to R_fillet
+    n_blade = N_SAMPLES // 4
+    for i in range(n_blade + 1):
+        z = BLADE_HEIGHT - (BLADE_HEIGHT - R_fillet) * i / n_blade
+        rhos_and_zs.append((r_blade, z))
+
+    # Fillet: ρ ∈ [r_blade, r_blade+R_fillet], z = z_fillet(ρ)
     n_f = N_SAMPLES // 2
-    for i in range(n_f + 1):
-        rhos.append(r_blade + R_fillet * i / n_f)
+    for i in range(1, n_f + 1):
+        rho = r_blade + R_fillet * i / n_f
+        rhos_and_zs.append((rho, z_fillet(rho)))
+
+    # Endwall top: ρ ∈ [r_blade+R_fillet, r_blade+R_fillet+off], z=0
     n_e = N_SAMPLES // 4
     for i in range(1, n_e + 1):
-        rhos.append(r_blade + R_fillet + off * i / n_e)
-    rhos.append(r_blade + R_fillet + off)
+        rho = (r_blade + R_fillet) + off * i / n_e
+        rhos_and_zs.append((rho, 0.0))
+    rhos_and_zs.append((r_blade + R_fillet + off, 0.0))
 
     edges = []
-    for rho in rhos:
+    for rho, z in rhos_and_zs:
         θ_a = θ_c - half_C / rho
         θ_b = θ_c + half_C / rho
-        if rho <= r_blade + R_fillet:
-            z = z_fillet(rho)
-        else:
-            z = 0.0
-        # Arc at radius rho, height z
         arc = make_arc_edge_z(rho, math.degrees(θ_a), math.degrees(θ_b), z)
         edges.append(arc)
 
@@ -197,9 +208,9 @@ for idx in range(N_BANDS):
     θ0 = station_angles_deg[idx]  # band start on blade
     θ1 = station_angles_deg[idx + 1]  # band end on blade
 
-    # Blade equal-arc at z=R_fillet (blade-fillet junction, "向上平移")
-    blade_arc_zR = make_arc_edge_z(r_blade, θ0, θ1, R_fillet)
-    curves[f"ply_band_{idx:04d}_blade_equal_arc"] = blade_arc_zR
+    # Blade equal-arc at z=blade_height (blade top, "向上平移和叶身高度一致")
+    blade_arc_top = make_arc_edge_z(r_blade, θ0, θ1, BLADE_HEIGHT)
+    curves[f"ply_band_{idx:04d}_blade_equal_arc"] = blade_arc_top
 
     # Expanded equal-arc at z=0 (endwall top)
     θ_a_exp = θ_c - half_C_at_end_deg
