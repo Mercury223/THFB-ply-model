@@ -1,13 +1,11 @@
-"""Half-circle blade test — curves only, hyperbolic spiral formulation.
+"""Half-circle blade test — curves only, symmetric hyperbolic spirals.
 
-User's notation:
-  r = blade outer radius (= OUTER_RADIUS = 33)
-  R = fillet radius in xz profile (= FILLET_RADIUS = 2)
+Both side_a and side_b follow hyperbolic spirals symmetric about the band center:
+  θ_center = θ_start + C/(2r)
+  θ_a(ρ) = θ_center - C/(2ρ)   (left endpoint)
+  θ_b(ρ) = θ_center + C/(2ρ)   (right endpoint)
 
-Hyperbolic spiral (双曲螺线) in fillet:
-  ρ ∈ [r, r+R]:   ρ × Δθ = C  (equal arc-length),  z = R - √(R² - (r+R-ρ)²)
-  ρ ∈ [r+R, r+R+off]:  z = 0, θ follows same spiral to expanded endpoint
-  ρ = r+R+off:  drop to z = -t
+z(ρ) = R - √(R² - (r+R-ρ)²)  for ρ ∈ [r, r+R]
 """
 import math
 import cadquery as cq
@@ -15,21 +13,20 @@ from pathlib import Path
 
 # ── Parameters ──
 BLADE_HEIGHT = 80.0
-OUTER_RADIUS = 33.0     # user's r — blade outer radius
-FILLET_RADIUS = 2.0     # user's R — fillet quarter-circle radius
+OUTER_RADIUS = 33.0     # r — blade outer radius
+FILLET_RADIUS = 2.0     # R — fillet quarter-circle radius
 PLY_EXPAND_OFFSET = 60.0
 PLY_LAYER_THICKNESS = 1.0
 ANGLE_START = -90.0
 ANGLE_END = 90.0
 N_BANDS = 3
-N_SAMPLES = 30  # sample count for spiral curves
+N_SAMPLES = 40
 
-# User's notation (match the derivation)
-r_blade = OUTER_RADIUS   # inner circle radius = 33
-R_fillet = FILLET_RADIUS  # xz profile quarter-circle radius = 2
+r_blade = OUTER_RADIUS
+R_fillet = FILLET_RADIUS
 off = PLY_EXPAND_OFFSET
 t = PLY_LAYER_THICKNESS
-C = r_blade * math.radians(ANGLE_END - ANGLE_START) / N_BANDS  # equal arc-length per band
+C = r_blade * math.radians(ANGLE_END - ANGLE_START) / N_BANDS
 
 print(f"Hyperbolic spiral curves test")
 print(f"  r (blade radius) = {r_blade}")
@@ -76,45 +73,33 @@ def z_fillet(rho):
     return R_fillet - math.sqrt(max(0, R_fillet**2 - d**2))
 
 
-def connector_wire(theta_ref_deg, is_side_b=False):
-    """Build 3D connector wire.
+def connector_wire(theta_center_deg, sign):
+    """Build symmetric spiral connector wire.
 
-    theta_ref = band START angle θ₀.
+    sign = -1 for side_a (left), +1 for side_b (right).
+    θ(ρ) = θ_center + sign × C/(2ρ)
+    At ρ=r_blade: θ = θ_center + sign × C/(2r) = band endpoint on inner circle.
 
-    side_a (is_side_b=False): radial line, θ = θ_ref for all ρ.
-      Blade junction at (r_blade, θ_ref).
-
-    side_b (is_side_b=True): hyperbolic spiral, θ(ρ) = θ_ref + C/ρ.
-      At ρ=r_blade: θ = θ_ref + C/r_blade = band END angle.  ← wire starts here
-      Blade junction at (r_blade, θ_ref + C/r_blade).
-
-    Path: blade top → blade-fillet junction → fillet spiral (ρ: r→r+R)
-          → endwall top (ρ: r+R→r+R+off, z=0) → drop to z=-t
+    Path: blade top → blade-fillet(z=R) → fillet spiral → endwall(z=0) → drop(z=-t)
     """
-    θ_ref = math.radians(theta_ref_deg)
+    θ_c = math.radians(theta_center_deg)
+    half_C = C / 2.0
 
     # Blade junction angle
-    if is_side_b:
-        θ_junction = θ_ref + C / r_blade  # band end angle on inner circle
-    else:
-        θ_junction = θ_ref               # band start angle (radial)
-
+    θ_junction = θ_c + sign * half_C / r_blade
     pts = []
 
-    # 1) Blade top → blade-fillet junction
+    # 1) Blade vertical segment
     pts.append(v3(r_blade * math.cos(θ_junction),
                   r_blade * math.sin(θ_junction), BLADE_HEIGHT))
     pts.append(v3(r_blade * math.cos(θ_junction),
                   r_blade * math.sin(θ_junction), R_fillet))
 
-    # 2) Fillet: ρ ∈ [r_blade, r_blade + R_fillet]
+    # 2) Fillet spiral: ρ ∈ [r_blade, r_blade + R_fillet]
     n_fillet = N_SAMPLES // 2
     for i in range(1, n_fillet + 1):
         rho = r_blade + R_fillet * i / n_fillet
-        if is_side_b:
-            theta = θ_ref + C / rho
-        else:
-            theta = θ_ref
+        theta = θ_c + sign * half_C / rho
         z = z_fillet(rho)
         pts.append(v3(rho * math.cos(theta), rho * math.sin(theta), z))
 
@@ -122,18 +107,12 @@ def connector_wire(theta_ref_deg, is_side_b=False):
     n_endwall = N_SAMPLES // 2
     for i in range(1, n_endwall + 1):
         rho = (r_blade + R_fillet) + off * i / n_endwall
-        if is_side_b:
-            theta = θ_ref + C / rho
-        else:
-            theta = θ_ref
+        theta = θ_c + sign * half_C / rho
         pts.append(v3(rho * math.cos(theta), rho * math.sin(theta), 0.0))
 
     # 4) Drop to endwall bottom
     rho_end = r_blade + R_fillet + off
-    if is_side_b:
-        theta_end = θ_ref + C / rho_end
-    else:
-        theta_end = θ_ref
+    theta_end = θ_c + sign * half_C / rho_end
     pts.append(v3(rho_end * math.cos(theta_end), rho_end * math.sin(theta_end), -t))
 
     return make_polyline_edge(pts)
@@ -150,54 +129,46 @@ station_angles_deg = [
     ANGLE_START + math.degrees(i * C / r_blade) for i in range(N_BANDS + 1)
 ]
 
-# 1) Station wires (θ fixed = radial lines)
+# Band center angles
+band_centers_deg = [
+    0.5 * (station_angles_deg[i] + station_angles_deg[i + 1])
+    for i in range(N_BANDS)
+]
+
+# 1) Station wires (radial: θ fixed at station angle)
 for idx, ang in enumerate(station_angles_deg):
-    curves[f"ply_station_{idx:04d}"] = connector_wire(ang, is_side_b=False)
+    curves[f"ply_station_{idx:04d}"] = connector_wire(ang, 0)
     print(f"  station {idx}: blade θ={ang:.1f}° (radial)")
 
 # 2) Band curves
+half_C_deg = math.degrees(C / (2.0 * r_blade))  # half angular span on blade
+ρ_end = r_blade + R_fillet + off
+half_C_at_end_deg = math.degrees(C / (2.0 * ρ_end))
+
 for idx in range(N_BANDS):
-    θ0 = station_angles_deg[idx]      # band start on blade
+    θ_c = band_centers_deg[idx]   # band center angle
+    θ0 = station_angles_deg[idx]  # band start on blade
     θ1 = station_angles_deg[idx + 1]  # band end on blade
 
     # Blade equal-arc segment
     blade_arc = make_arc_edge(0, 0, r_blade, θ0, θ1)
     curves[f"ply_band_{idx:04d}_blade_equal_arc"] = blade_arc
 
-    # Expanded equal-arc segment: hyperbolic spiral endpoints at ρ_end
-    ρ_end = r_blade + R_fillet + off
-    θ0_exp_deg = math.degrees(math.radians(θ0) + C / ρ_end)
-    θ1_exp_deg = math.degrees(math.radians(θ0) + C / ρ_end)
-    # For side_b at band end: θ_end = θ_start + C/ρ_end
-    # θ_start of band = θ0. Band covers C/r_blade on blade.
-    # At ρ_end, side_a is at θ0_exp (θ0 + C/ρ_end)
-    # side_b is at θ0 + C/ρ_end  (same formula since θ0 already includes offset)
-
-    # The expanded band endpoints are:
-    # side_a of band i: θ = θ0 + C/ρ_end  (if side_a follows spiral too? No, side_a is radial)
-    # Hmm, but the user says side_a is radial (θ constant)
-    # So at ρ_end: side_a at θ0, side_b at θ0 + C/ρ_end
-
-    # For the expanded equal-arc curve, we show the band at ρ = r+R+off:
-    θ_a_end = θ0  # side_a at expanded radius (radial)
-    θ_b_end = math.degrees(math.radians(θ0) + C / ρ_end)  # side_b at expanded radius (spiral)
-
-    expanded_arc = make_arc_edge(0, 0, ρ_end, θ_a_end, θ_b_end)
+    # Expanded equal-arc: both endpoints spiral
+    θ_a_exp = θ_c - half_C_at_end_deg
+    θ_b_exp = θ_c + half_C_at_end_deg
+    expanded_arc = make_arc_edge(0, 0, ρ_end, θ_a_exp, θ_b_exp)
     curves[f"ply_band_{idx:04d}_expanded_equal_arc"] = expanded_arc
 
-    # Side A: θ = θ0 (radial line, fixed angle)
-    curves[f"ply_band_{idx:04d}_side_a"] = connector_wire(θ0, is_side_b=False)
+    # Side A: θ(ρ) = θ_c - C/(2ρ)  (sign=-1)
+    curves[f"ply_band_{idx:04d}_side_a"] = connector_wire(θ_c, -1)
 
-    # Side B: hyperbolic spiral from θ = θ1 at ρ=r to θ = θ0 + C/ρ at each ρ
-    # Wait — at ρ=r, side_b should be at θ1 = θ0 + C/r (band end on blade)
-    # The spiral formula: θ(ρ) = θ0 + C/ρ
-    # At ρ=r: θ = θ0 + C/r = θ1 ✓
-    # So side_b spiral starts from θ0 (the band START angle), not θ1!
-    curves[f"ply_band_{idx:04d}_side_b"] = connector_wire(θ0, is_side_b=True)
+    # Side B: θ(ρ) = θ_c + C/(2ρ)  (sign=+1)
+    curves[f"ply_band_{idx:04d}_side_b"] = connector_wire(θ_c, +1)
 
-    print(f"  band {idx}: blade[{θ0:.1f}°→{θ1:.1f}°] "
-          f"expanded[{θ_a_end:.1f}°→{θ_b_end:.1f}°] "
-          f"span={θ_b_end-θ_a_end:.1f}°")
+    print(f"  band {idx}: center={θ_c:.1f}° "
+          f"blade[{θ0:.1f}°→{θ1:.1f}°] span={θ1-θ0:.1f}° "
+          f"expanded[{θ_a_exp:.1f}°→{θ_b_exp:.1f}°] span={θ_b_exp-θ_a_exp:.1f}°")
 
 # ═══════════════════════════════════════════════════════════════
 # Export STEP
@@ -230,11 +201,13 @@ print(f"\n[STEP exported] {step_path}")
 print(f"  curves: {len(curves)}")
 
 # Verification
-print(f"\n[Verification]")
+print(f"\n[Verification — symmetric spirals]")
 for idx in range(N_BANDS):
-    θ0 = station_angles_deg[idx]
-    ρ_end = r_blade + R_fillet + off
-    print(f"  band {idx}: side_a spiral? No (θ={θ0:.1f}° fixed)")
-    print(f"           side_b at ρ={r_blade}: θ={θ0 + math.degrees(C/r_blade):.1f}°")
-    print(f"           side_b at ρ={r_blade+R_fillet}: θ={θ0 + math.degrees(C/(r_blade+R_fillet)):.1f}°")
-    print(f"           side_b at ρ={ρ_end}: θ={θ0 + math.degrees(C/ρ_end):.1f}°")
+    θ_c = band_centers_deg[idx]
+    half_C = C / 2.0
+    for label, rho in [("r (blade)", r_blade),
+                        ("r+R (fillet bottom)", r_blade + R_fillet),
+                        ("r+R+off (expanded)", r_blade + R_fillet + off)]:
+        θ_a = θ_c - math.degrees(half_C / rho)
+        θ_b = θ_c + math.degrees(half_C / rho)
+        print(f"  band {idx} at ρ={rho:.0f}: side_a={θ_a:.1f}° side_b={θ_b:.1f}° span={θ_b-θ_a:.1f}°")
