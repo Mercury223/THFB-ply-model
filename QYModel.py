@@ -91,6 +91,9 @@ class VaneBladeAndEndwallBuilder:
         ".git",
         ".gitignore",
         ".claude",
+        "QYModel_halfcircle.py",
+        "QYModel_spiral_backup.py",
+        "swhtest.prt",
     }
 
     def __init__(self, p: Params):
