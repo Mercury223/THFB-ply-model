@@ -115,10 +115,14 @@ def side_wire(theta_center_deg, sign, inner=False):
     θ_bot = θ_c + sign * half_C / ρ_bot
     pts.append(v3(ρ_bot * math.cos(θ_bot), ρ_bot * math.sin(θ_bot), z_bot))
 
-    # Endwall: ρ from 35 to 95
+    # Endwall: outer goes ρ=35→95, inner goes ρ=35→94 (smaller by t)
+    if inner:
+        ρ_ew_end = r_blade + R_fillet + off - t  # 94
+    else:
+        ρ_ew_end = r_blade + R_fillet + off       # 95
     n_e = N_SAMPLES // 2
     for i in range(1, n_e + 1):
-        ρ = (r_blade + R_fillet) + off * i / n_e
+        ρ = (r_blade + R_fillet) + (ρ_ew_end - r_blade - R_fillet) * i / n_e
         θ = θ_c + sign * half_C / ρ
         z = -t if inner else 0.0
         pts.append(v3(ρ * math.cos(θ), ρ * math.sin(θ), z))
@@ -137,10 +141,11 @@ def top_arc(inner=False):
 
 def bottom_arc(inner=False):
     half_C = C / 2.0
-    θ_a = math.degrees(math.radians(θ_center) - half_C / ρ_end)
-    θ_b = math.degrees(math.radians(θ_center) + half_C / ρ_end)
+    ρ = (r_blade + R_fillet + off - t) if inner else ρ_end
+    θ_a = math.degrees(math.radians(θ_center) - half_C / ρ)
+    θ_b = math.degrees(math.radians(θ_center) + half_C / ρ)
     z = -t if inner else 0.0
-    return arc_edge_z(ρ_end, θ_a, θ_b, z)
+    return arc_edge_z(ρ, θ_a, θ_b, z)
 
 
 # ═══════════════════════════════════════════════════════════════
