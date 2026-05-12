@@ -530,3 +530,87 @@ blade arc length = 103.67mm, blade_seg_len = 34.56mm
 - STEP 导出: `halfcircle_3bands.step` (164 KB)
 - 备份: `QYModel_spiral_backup.py` (当前 spiral 版)
 - 测试文件: `QYModel_halfcircle.py`
+
+---
+
+## 17. 双曲螺线建模 (2026-05-12)
+
+### 17.1 数学推导
+
+外表面边界曲线由双曲螺线定义：
+
+**等弧长条件**：内侧圆半径 r，从 θ=0 到 θ=Δθ 走过弧长 C=r×Δθ。任意半径 ρ 上走同样弧长，角度跨度为 Δθ(ρ)=C/ρ。
+
+**中心固定**：band 中心角 θ_c 恒定，左右端点关于中心对称：
+```
+θ_a(ρ) = θ_c - C/(2ρ)    (side_a / 左端点)
+θ_b(ρ) = θ_c + C/(2ρ)    (side_b / 右端点)
+```
+
+**高度函数**：xz 剖面四分之一圆 (中心 (r+R, R)，半径 R)：
+```
+z(ρ) = R - √(R² - (r+R-ρ)²)    ρ ∈ [r, r+R]
+z = 0                           ρ ∈ [r+R, r+R+off]  (缘板顶面)
+```
+
+**三维曲线**（以 ρ 为参数）：
+```
+x(ρ) = ρ × cos(θ_c ± C/(2ρ))
+y(ρ) = ρ × sin(θ_c ± C/(2ρ))
+z(ρ) = z(ρ)
+```
+
+### 17.2 半圆测试模型参数
+
+| 参数 | 值 |
+|------|-----|
+| 叶身半径 r | 33 mm |
+| 倒圆半径 R | 2 mm |
+| 扩展偏置 off | 60 mm |
+| 铺层厚度 t | 1 mm |
+| Band 角度 | 60° (3 bands, half circle 180°) |
+| C (弧长/band) | π×33/3 = 34.56 mm |
+
+### 17.3 角度验证
+
+| ρ | side_a | side_b | span |
+|---|--------|--------|------|
+| 33 (blade) | -90.0° | -30.0° | 60.0° |
+| 35 (fillet底) | -88.3° | -31.7° | 56.6° |
+| 95 (endwall) | -70.4° | -49.6° | 20.8° |
+
+### 17.4 文件状态
+
+- `QYModel_halfcircle.py`：外表面曲线生成（单 band，4 curves）
+- `QYModel.py`：原始 QYModel（12 bands，connector wire z- fold 已修复）
+- `QYModel_spiral_backup.py`：spiral 版备份
+
+### 17.5 关键 Commits
+
+```
+870a3b3 revert: outer surface curves only — single band, 4 curves
+2d26baf fix: inner surface fully independent — own fillet center at ρ=34
+4a82dc3 fix: inner surface uses own C_inner = (r_blade-t)*Δθ, not C_outer
+973ea7e fix: inner endwall outer edge at ρ=94 (smaller by t), own spiral angles
+22dea5b fix: inner blade portion uses same angles as outer (radial side edges)
+e81a1ae feat: single band (1/3) offset curves — outer + inner surfaces
+661e87c feat: offset curve pairs (inner/outer) — no solids
+5001213 fix: inner arc uses spiral at rho_in, outer at rho_out
+73f3fde fix: smooth fillet via BRepPrimAPI_MakeRevol, split at z=R_fillet
+1f82388 fix: fillet solid uses ThruSections with spiral side angles
+1f281bf fix: use QYModel three-layer approach for band solids
+f9d9a3e feat: band solids via ThruSections closed-wire loft
+4efc0ca fix: add QYModel_halfcircle.py, backup, swhtest.prt to KEEP_FILES
+b84527c fix: remove z- fold from QYModel connector wire, fix halfcircle surface wrinkles
+af9603e fix: blade_equal_arc at blade_height z=80, surface covers full blade height
+2d02c34 fix: trim connector wires, blade arc at z=R, expanded arc at z=0
+2558aa2 fix: symmetric hyperbolic spirals for both side_a and side_b
+f12b1fd fix: spiral connector wire on fillet + loft-based arc band fillet solid
+a82d0bc fix: connector wire bifurcation at z=r on blade curve
+```
+
+### 17.6 已知问题
+
+1. 内侧(offset)表面曲线与外侧在缘板段 XY 投影几乎重合，需进一步调整内侧缘板 ρ 范围
+2. QYModel.py 的 band 实体尚未更新为螺旋角体系
+3. 实体生成（ThruSections/revolve/extrude）均有不同程度的光顺性或边界匹配问题
