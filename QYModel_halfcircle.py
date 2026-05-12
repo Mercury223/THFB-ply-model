@@ -113,59 +113,106 @@ def connector_wire(theta_center_deg, sign):
     return make_polyline_edge(pts)
 
 
-def band_surface(theta_center_deg):
-    """Create band surface: loft arcs from blade-fillet junction to expanded curve.
+def rho_inner_at_z(z):
+    """Inner quarter-circle radius at height z (fillet region)."""
+    if z >= R_fillet - 1e-9:
+        return r_blade - t
+    if z <= 0.0:
+        return r_blade + R_fillet
+    rr = R_fillet + t  # inner arc radius
+    sin_phi = (R_fillet - z) / rr
+    if sin_phi > 1.0:
+        sin_phi = 1.0
+    cos_phi = math.sqrt(max(0, 1.0 - sin_phi ** 2))
+    return (r_blade + R_fillet) - rr * cos_phi
 
-    Boundary curves: side_a + blade_arc(z=R) + side_b + expanded_arc(z=0).
+
+def band_solid(theta_center_deg):
+    """Build band solid via ThruSections with closed wires.
+
+    Each cross-section is a closed 4-edge loop:
+      inner arc → side_b → outer arc → side_a
+
+    ThruSections(isSolid=True) lofts directly to a Solid.
     """
     from OCP.BRepOffsetAPI import BRepOffsetAPI_ThruSections
 
+    N_ARC = 21
     θ_c = math.radians(theta_center_deg)
     half_C = C / 2.0
 
-    # ρ/z sampling: blade (ρ=r, z=blade_height→R) + fillet (ρ=r→r+R) + endwall (ρ=r+R→r+R+off)
-    rhos_and_zs = []
-
-    # Blade portion: ρ=r_blade, z from blade_height down to R_fillet
+    # ── Sample levels: (ρ_outer, z, ρ_inner) ──
+    levels = []
+    # Blade: ρ=r_blade, z from high to R_fillet
     n_blade = N_SAMPLES // 4
     for i in range(n_blade + 1):
         z = BLADE_HEIGHT - (BLADE_HEIGHT - R_fillet) * i / n_blade
-        rhos_and_zs.append((r_blade, z))
-
-    # Fillet: ρ ∈ [r_blade, r_blade+R_fillet], z = z_fillet(ρ)
+        levels.append((r_blade, z, r_blade - t))
+    # Fillet: stop before ρ=r+R (last point is endwall start)
     n_f = N_SAMPLES // 2
-    for i in range(1, n_f + 1):
+    for i in range(1, n_f):
         rho = r_blade + R_fillet * i / n_f
-        rhos_and_zs.append((rho, z_fillet(rho)))
-
-    # Endwall top: ρ ∈ [r_blade+R_fillet, r_blade+R_fillet+off], z=0
+        z = z_fillet(rho)
+        rho_in = rho_inner_at_z(z)
+        if rho_in >= rho - 0.01:
+            rho_in = rho - 0.01
+        levels.append((rho, z, rho_in))
+    # Endwall: skip first level (same as last fillet ρ=35)
     n_e = N_SAMPLES // 4
     for i in range(1, n_e + 1):
         rho = (r_blade + R_fillet) + off * i / n_e
-        rhos_and_zs.append((rho, 0.0))
-    rhos_and_zs.append((r_blade + R_fillet + off, 0.0))
+        levels.append((rho, 0.0, r_blade + R_fillet))
+    levels.append((r_blade + R_fillet + off, 0.0, r_blade + R_fillet))
 
-    edges = []
-    for rho, z in rhos_and_zs:
-        θ_a = θ_c - half_C / rho
-        θ_b = θ_c + half_C / rho
-        arc = make_arc_edge_z(rho, math.degrees(θ_a), math.degrees(θ_b), z)
-        edges.append(arc)
+    # ── Build closed wires ──
+    wires = []
+    for rho_out, z, rho_in in levels:
+        θ_ao = θ_c - half_C / rho_out
+        θ_bo = θ_c + half_C / rho_out
+        θ_ai = θ_c - half_C / rho_in
+        θ_bi = θ_c + half_C / rho_in
 
-    if len(edges) < 2:
+        edges = []
+        # Inner arc: θ_ai → θ_bi
+        pts = [cq.Vector(rho_in * math.cos(θ_c + u * half_C / rho_in),
+                         rho_in * math.sin(θ_c + u * half_C / rho_in), z)
+               for u in (2.0 * j / (N_ARC - 1) - 1.0 for j in range(N_ARC))]
+        for j in range(N_ARC - 1):
+            edges.append(cq.Edge.makeLine(pts[j], pts[j + 1]))
+
+        # Side B
+        edges.append(cq.Edge.makeLine(
+            cq.Vector(rho_in * math.cos(θ_bi), rho_in * math.sin(θ_bi), z),
+            cq.Vector(rho_out * math.cos(θ_bo), rho_out * math.sin(θ_bo), z)))
+
+        # Outer arc: θ_bo → θ_ao (reversed for CCW)
+        pts = [cq.Vector(rho_out * math.cos(θ_c + u * half_C / rho_out),
+                         rho_out * math.sin(θ_c + u * half_C / rho_out), z)
+               for u in (1.0 - 2.0 * j / (N_ARC - 1) for j in range(N_ARC))]
+        for j in range(N_ARC - 1):
+            edges.append(cq.Edge.makeLine(pts[j], pts[j + 1]))
+
+        # Side A
+        edges.append(cq.Edge.makeLine(
+            cq.Vector(rho_out * math.cos(θ_ao), rho_out * math.sin(θ_ao), z),
+            cq.Vector(rho_in * math.cos(θ_ai), rho_in * math.sin(θ_ai), z)))
+
+        wires.append(cq.Wire.assembleEdges(edges))
+
+    if len(wires) < 2:
         return None
     try:
-        loft = BRepOffsetAPI_ThruSections(False, False, 1e-4)
-        for e in edges:
-            loft.AddWire(cq.Wire.assembleEdges([e]).wrapped)
+        loft = BRepOffsetAPI_ThruSections(True, False, 1e-4)
+        for w in wires:
+            loft.AddWire(w.wrapped)
         loft.Build()
-        return cq.Face(loft.Shape())
+        return cq.Solid(loft.Shape())
     except Exception:
         return None
 
 
 def make_arc_edge_z(radius, angle0_deg, angle1_deg, z):
-    """Create circular arc edge at given z height."""
+    """Create circular arc edge at given z height (for curve display)."""
     a0 = math.radians(angle0_deg)
     a1 = math.radians(angle1_deg)
     p0 = cq.Vector(radius * math.cos(a0), radius * math.sin(a0), z)
@@ -224,15 +271,16 @@ for idx in range(N_BANDS):
     # Side B: θ(ρ) = θ_c + C/(2ρ)  (sign=+1)
     curves[f"ply_band_{idx:04d}_side_b"] = connector_wire(θ_c, +1)
 
-    # Band surface: loft arcs from ρ=r to ρ=r+R+off
-    surf = band_surface(θ_c)
-    if surf is not None:
-        curves[f"ply_band_{idx:04d}_surface"] = surf
+    # Band solid: ThruSections with closed wires
+    solid = band_solid(θ_c)
+    if solid is not None:
+        curves[f"ply_band_{idx:04d}_solid"] = solid
 
     print(f"  band {idx}: center={θ_c:.1f}° "
           f"blade[{θ0:.1f}°→{θ1:.1f}°] span={θ1-θ0:.1f}° "
           f"expanded[{θ_a_exp:.1f}°→{θ_b_exp:.1f}°] span={θ_b_exp-θ_a_exp:.1f}° "
-          f"surf={'OK' if surf is not None else 'FAIL'}")
+          f"solid={'OK' if solid is not None else 'FAIL'} "
+          f"valid={solid.isValid() if solid is not None else 'N/A'}")
 
 # ═══════════════════════════════════════════════════════════════
 # Export STEP
@@ -254,11 +302,11 @@ for name, item in curves.items():
         color = cq.Color(0.0, 1.0, 0.0)  # green
     elif "expanded_equal_arc" in name:
         color = cq.Color(1.0, 0.5, 0.0)  # orange
-    elif "surface" in name:
+    elif "solid" in name:
         hue = int(name.split("_")[2]) / max(N_BANDS - 1, 1)
         import colorsys
-        rc, gc, bc = colorsys.hsv_to_rgb(hue, 0.5, 0.7)
-        color = cq.Color(rc, gc, bc, 0.6)
+        rc, gc, bc = colorsys.hsv_to_rgb(hue, 0.8, 0.85)
+        color = cq.Color(rc, gc, bc)
     else:
         color = cq.Color(1.0, 1.0, 1.0)
     assy.add(item, name=name, color=color)
