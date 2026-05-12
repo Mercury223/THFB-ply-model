@@ -77,12 +77,14 @@ def side_wire(theta_center_deg, sign, inner=False):
     if inner:
         ρ_blade = r_blade - t
         R_f = R_fillet + t
+        # Blade portion: radial sides (same angle as outer at blade)
+        θ_blade_outer = θ_c + sign * half_C / r_blade
+        θ_j = θ_blade_outer
     else:
         ρ_blade = r_blade
         R_f = R_fillet
+        θ_j = θ_c + sign * half_C / ρ_blade
 
-    # Blade junction angle
-    θ_j = θ_c + sign * half_C / ρ_blade
     pts.append(v3(ρ_blade * math.cos(θ_j), ρ_blade * math.sin(θ_j), BLADE_HEIGHT))
     pts.append(v3(ρ_blade * math.cos(θ_j), ρ_blade * math.sin(θ_j), R_fillet))
 
@@ -125,10 +127,11 @@ def side_wire(theta_center_deg, sign, inner=False):
 
 
 def top_arc(inner=False):
-    ρ = r_blade - t if inner else r_blade
+    """Top arc: same angles for inner/outer (perpendicular side edges)."""
     half_C = C / 2.0
-    θ_a = math.degrees(math.radians(θ_center) - half_C / ρ)
-    θ_b = math.degrees(math.radians(θ_center) + half_C / ρ)
+    θ_a = math.degrees(math.radians(θ_center) - half_C / r_blade)
+    θ_b = math.degrees(math.radians(θ_center) + half_C / r_blade)
+    ρ = r_blade - t if inner else r_blade
     return arc_edge_z(ρ, θ_a, θ_b, BLADE_HEIGHT)
 
 
@@ -170,14 +173,9 @@ for label, ρ in [("blade top", r_blade),
     θ_b = θ_center + math.degrees(half_C / ρ)
     print(f"  ρ={ρ:3.0f}: side_a={θ_a:.1f}° side_b={θ_b:.1f}° span={θ_b-θ_a:.1f}°")
 
-ρ_in_blade = r_blade - t
-print(f"\nInner surface angles:")
-for label, ρ in [("blade top", ρ_in_blade),
-                  ("fillet bottom", r_blade + R_fillet),
-                  ("endwall bottom", r_blade + R_fillet + off)]:
-    θ_a = θ_center - math.degrees(half_C / ρ)
-    θ_b = θ_center + math.degrees(half_C / ρ)
-    print(f"  ρ={ρ:3.0f}: side_a={θ_a:.1f}° side_b={θ_b:.1f}° span={θ_b-θ_a:.1f}°")
+print(f"\nInner surface:")
+print(f"  blade: same angles as outer ({θ_center - math.degrees(half_C/r_blade):.1f}° → {θ_center + math.degrees(half_C/r_blade):.1f}°), ρ={r_blade-t}")
+print(f"  fillet+endwall: spiral at inner radii")
 
 # ═══════════════════════════════════════════════════════════════
 # Export
