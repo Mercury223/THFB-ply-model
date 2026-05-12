@@ -113,121 +113,112 @@ def connector_wire(theta_center_deg, sign):
     return make_polyline_edge(pts)
 
 
-def band_solid(θ_c_deg, θ_in0_deg, θ_in1_deg, θ_out0_deg, θ_out1_deg):
-    """Three-layer band solid — side faces follow spiral curves exactly.
+def thickened_wire(theta_center_deg, sign, inner=False):
+    """Generate thickened side wire: inner (blade+fillet+endwall surface) or outer (offset by t).
 
-    - Blade: extrude +Z, blade angles → matches curves at ρ=r_blade
-    - Fillet+Endwall: single ThruSections loft with 4-edge wires (arc+line+arc+line),
-      each arc uses makeThreePointArc for smooth geometry
-    - All cross-sections have identical topology → no vertex-matching wrinkles
+    sign=-1 for side_a, +1 for side_b.
+    inner=True: on blade+fillet+endwall outer surface (band outer face).
+    inner=False: offset inward/downward by t (band inner face).
     """
-    from OCP.BRepOffsetAPI import BRepOffsetAPI_ThruSections
-
-    θ_c = math.radians(float(θ_c_deg))
-    θ_in0 = float(θ_in0_deg)
-    θ_in1 = float(θ_in1_deg)
-    θ_out0 = float(θ_out0_deg)
-    θ_out1 = float(θ_out1_deg)
+    θ_c = math.radians(theta_center_deg)
     half_C = C / 2.0
-    Rinner0 = r_blade + R_fillet         # 35
-    Router = r_blade + R_fillet + off      # 95
+    pts = []
 
-    # ── Blade sub-solid (z=R_fillet .. blade_height) ──
-    a0r, a1r = math.radians(θ_in0), math.radians(θ_in1)
-    blade_outer = make_arc_edge_z(r_blade, θ_in0, θ_in1, 0)
-    blade_inner = make_arc_edge_z(r_blade - t, θ_in1, θ_in0, 0)
-    bp_s = cq.Vector(r_blade * math.cos(a0r), r_blade * math.sin(a0r), 0)
-    bp_e = cq.Vector(r_blade * math.cos(a1r), r_blade * math.sin(a1r), 0)
-    ip_s = cq.Vector((r_blade - t) * math.cos(a0r), (r_blade - t) * math.sin(a0r), 0)
-    ip_e = cq.Vector((r_blade - t) * math.cos(a1r), (r_blade - t) * math.sin(a1r), 0)
-    blade_edges = [blade_outer, cq.Edge.makeLine(bp_e, ip_e),
-                   blade_inner, cq.Edge.makeLine(ip_s, bp_s)]
-    blade_wire = cq.Wire.assembleEdges(blade_edges)
-    blade_face = cq.Face.makeFromWires(blade_wire)
-    blade_solid = cq.Workplane("XY").add(blade_face).extrude(
-        BLADE_HEIGHT - R_fillet).val()
-    blade_solid = blade_solid.translate(cq.Vector(0, 0, R_fillet))
+    # Blade junction angle (on band outer surface at ρ=r_blade)
+    θ_junction_outer = θ_c + sign * half_C / r_blade
 
-    # ── Fillet+Endwall loft: z=R_fillet .. z=-t ──
-    levels = []
-    wires = []
-    # Blade-fillet junction
-    levels.append((r_blade, R_fillet))
-    # Fillet samples
-    for i in range(1, N_SAMPLES // 3):
-        rho = r_blade + R_fillet * i / (N_SAMPLES // 3)
-        levels.append((rho, z_fillet(rho)))
-    # Fillet bottom = endwall top
-    levels.append((Rinner0, 0.0))
-    # Endwall samples
-    for i in range(1, N_SAMPLES // 3):
-        rho = Rinner0 + off * i / (N_SAMPLES // 3)
-        levels.append((rho, 0.0))
-    # Endwall bottom
-    levels.append((Router, -t))
+    # Blade portion: ρ=r_blade, z from blade_height down to R_fillet
+    if inner:
+        # Offset inward: ρ = r_blade - t
+        ρ_blade = r_blade - t
+        θ_junction = θ_c + sign * half_C / ρ_blade
+    else:
+        ρ_blade = r_blade
+        θ_junction = θ_junction_outer
 
-    # Spiral angles at each level — inner arc uses spiral at ρ_in, outer at ρ
-    for rho, z in levels:
-        # Inner radius
-        if rho <= Rinner0:
-            if z >= R_fillet - 1e-9:
-                rho_in = r_blade - t
-            elif z <= 0.0:
-                rr = R_fillet + t
-                sin_phi = R_fillet / rr
-                cos_phi = math.sqrt(max(0, 1.0 - sin_phi ** 2))
-                rho_in = Rinner0 - rr * cos_phi
-            else:
-                rr = R_fillet + t
-                sin_phi = (R_fillet - z) / rr
-                if sin_phi > 1.0:
-                    sin_phi = 1.0
-                cos_phi = math.sqrt(max(0, 1.0 - sin_phi ** 2))
-                rho_in = Rinner0 - rr * cos_phi
+    pts.append(v3(ρ_blade * math.cos(θ_junction),
+                  ρ_blade * math.sin(θ_junction), BLADE_HEIGHT))
+    pts.append(v3(ρ_blade * math.cos(θ_junction),
+                  ρ_blade * math.sin(θ_junction), R_fillet))
+
+    # Fillet portion: ρ from r_blade to r_blade+R_fillet
+    n_f = N_SAMPLES // 2
+    for i in range(1, n_f):
+        if inner:
+            # Inner quarter-circle radius
+            z = R_fillet * (1.0 - i / n_f)
+            rr = R_fillet + t
+            sin_phi = (R_fillet - z) / rr
+            if sin_phi > 1.0:
+                sin_phi = 1.0
+            cos_phi = math.sqrt(max(0, 1.0 - sin_phi ** 2))
+            ρ = (r_blade + R_fillet) - rr * cos_phi
         else:
-            rho_in = Rinner0
+            ρ = r_blade + R_fillet * i / n_f
+            z = z_fillet(ρ) if i < n_f else 0.0
 
-        # Spiral at outer radius
-        θ_ao = math.degrees(θ_c - half_C / rho)
-        θ_bo = math.degrees(θ_c + half_C / rho)
-        # Spiral at inner radius
-        θ_ai = math.degrees(θ_c - half_C / rho_in)
-        θ_bi = math.degrees(θ_c + half_C / rho_in)
+        θ = θ_c + sign * half_C / ρ
+        pts.append(v3(ρ * math.cos(θ), ρ * math.sin(θ), z))
 
-        # Build 4-edge closed wire: inner arc → sideB → outer arc → sideA
-        edges = []
-        edges.append(make_arc_edge_z(rho_in, θ_ai, θ_bi, z))
-        edges.append(cq.Edge.makeLine(
-            cq.Vector(rho_in * math.cos(math.radians(θ_bi)),
-                      rho_in * math.sin(math.radians(θ_bi)), z),
-            cq.Vector(rho * math.cos(math.radians(θ_bo)),
-                      rho * math.sin(math.radians(θ_bo)), z)))
-        edges.append(make_arc_edge_z(rho, θ_bo, θ_ao, z))
-        edges.append(cq.Edge.makeLine(
-            cq.Vector(rho * math.cos(math.radians(θ_ao)),
-                      rho * math.sin(math.radians(θ_ao)), z),
-            cq.Vector(rho_in * math.cos(math.radians(θ_ai)),
-                      rho_in * math.sin(math.radians(θ_ai)), z)))
+    # Fillet bottom / endwall top
+    if inner:
+        rr = R_fillet + t
+        sin_phi = R_fillet / rr
+        cos_phi = math.sqrt(max(0, 1.0 - sin_phi ** 2))
+        ρ_bottom = (r_blade + R_fillet) - rr * cos_phi
+    else:
+        ρ_bottom = r_blade + R_fillet
+    θ_bottom = θ_c + sign * half_C / ρ_bottom
+    pts.append(v3(ρ_bottom * math.cos(θ_bottom),
+                  ρ_bottom * math.sin(θ_bottom), 0.0))
 
-        wires.append(cq.Wire.assembleEdges(edges))
+    # Endwall top: ρ from r+R to r+R+off, z=0 (inner) or z=-t (outer)
+    if inner:
+        z_ew = -t
+    else:
+        z_ew = 0.0
 
-    # Loft
-    fillet_ew_solid = None
-    if len(wires) >= 2:
-        try:
-            loft = BRepOffsetAPI_ThruSections(True, False, 1e-4)
-            for w in wires:
-                loft.AddWire(w.wrapped)
-            loft.Build()
-            fillet_ew_solid = cq.Solid(loft.Shape())
-        except Exception:
-            pass
+    n_e = N_SAMPLES // 2
+    for i in range(1, n_e + 1):
+        ρ = (r_blade + R_fillet) + off * i / n_e
+        θ = θ_c + sign * half_C / ρ
+        pts.append(v3(ρ * math.cos(θ), ρ * math.sin(θ), z_ew))
 
-    # ── Fuse blade + fillet_ew ──
-    band = blade_solid
-    if fillet_ew_solid is not None and fillet_ew_solid.isValid():
-        band = band.fuse(fillet_ew_solid)
-    return band if band.isValid() else None
+    return make_polyline_edge(pts)
+
+
+def band_boundary_curves(θ_c_deg):
+    """Return the 4 boundary curves of a band: top arc, bottom arc, left wire, right wire.
+
+    Each curve has an inner (offset) and outer (on surface) version.
+    """
+    θ_c = float(θ_c_deg)
+    half_C = C / 2.0
+    ρ_end = r_blade + R_fillet + off
+
+    curves = {}
+
+    # ── Side A (left) ──
+    curves["side_a_outer"] = connector_wire(θ_c, -1)
+    curves["side_a_inner"] = thickened_wire(θ_c, -1, inner=True)
+
+    # ── Side B (right) ──
+    curves["side_b_outer"] = connector_wire(θ_c, +1)
+    curves["side_b_inner"] = thickened_wire(θ_c, +1, inner=True)
+
+    # ── Top arc (at z=blade_height) ──
+    θ_a0 = math.degrees(math.radians(θ_c) - half_C / r_blade)
+    θ_a1 = math.degrees(math.radians(θ_c) + half_C / r_blade)
+    curves["top_arc_outer"] = make_arc_edge_z(r_blade, θ_a0, θ_a1, BLADE_HEIGHT)
+    curves["top_arc_inner"] = make_arc_edge_z(r_blade - t, θ_a0, θ_a1, BLADE_HEIGHT)
+
+    # ── Bottom arc (at z=-t or z=0) ──
+    θ_b0 = math.degrees(math.radians(θ_c) - half_C / ρ_end)
+    θ_b1 = math.degrees(math.radians(θ_c) + half_C / ρ_end)
+    curves["bottom_arc_outer"] = make_arc_edge_z(ρ_end, θ_b0, θ_b1, 0.0)
+    curves["bottom_arc_inner"] = make_arc_edge_z(ρ_end, θ_b0, θ_b1, -t)
+
+    return curves
 
 
 def make_arc_edge_z(radius, angle0_deg, angle1_deg, z):
@@ -290,15 +281,14 @@ for idx in range(N_BANDS):
     # Side B: θ(ρ) = θ_c + C/(2ρ)  (sign=+1)
     curves[f"ply_band_{idx:04d}_side_b"] = connector_wire(θ_c, +1)
 
-    # Band solid: three-layer with spiral side faces
-    solid = band_solid(θ_c, θ0, θ1, θ_a_exp, θ_b_exp)
-    if solid is not None and solid.isValid():
-        curves[f"ply_band_{idx:04d}_solid"] = solid
+    # Band offset curves (inner/outer boundaries)
+    bw = band_boundary_curves(θ_c)
+    for k, v in bw.items():
+        curves[f"ply_band_{idx:04d}_{k}"] = v
 
     print(f"  band {idx}: center={θ_c:.1f}° "
           f"blade[{θ0:.1f}°→{θ1:.1f}°] span={θ1-θ0:.1f}° "
-          f"expanded[{θ_a_exp:.1f}°→{θ_b_exp:.1f}°] span={θ_b_exp-θ_a_exp:.1f}° "
-          f"solid={'OK' if solid is not None and solid.isValid() else 'FAIL'}")
+          f"expanded[{θ_a_exp:.1f}°→{θ_b_exp:.1f}°] span={θ_b_exp-θ_a_exp:.1f}°")
 
 # ═══════════════════════════════════════════════════════════════
 # Export STEP
@@ -312,19 +302,22 @@ assy = cq.Assembly(name="HALFCIRCLE_CURVES")
 for name, item in curves.items():
     if "station" in name:
         color = cq.Color(1.0, 1.0, 0.0)  # yellow
-    elif "side_a" in name:
+    elif "side_a_outer" in name:
         color = cq.Color(1.0, 0.0, 0.0)  # red
-    elif "side_b" in name:
+    elif "side_b_outer" in name:
         color = cq.Color(0.0, 0.0, 1.0)  # blue
+    elif "side_a_inner" in name:
+        color = cq.Color(1.0, 0.3, 0.3)  # light red
+    elif "side_b_inner" in name:
+        color = cq.Color(0.3, 0.3, 1.0)  # light blue
+    elif "top_arc" in name:
+        color = cq.Color(0.0, 1.0, 0.0)  # green
+    elif "bottom_arc" in name:
+        color = cq.Color(1.0, 0.5, 0.0)  # orange
     elif "blade_equal_arc" in name:
         color = cq.Color(0.0, 1.0, 0.0)  # green
     elif "expanded_equal_arc" in name:
         color = cq.Color(1.0, 0.5, 0.0)  # orange
-    elif "solid" in name:
-        hue = int(name.split("_")[2]) / max(N_BANDS - 1, 1)
-        import colorsys
-        rc, gc, bc = colorsys.hsv_to_rgb(hue, 0.8, 0.85)
-        color = cq.Color(rc, gc, bc)
     else:
         color = cq.Color(1.0, 1.0, 1.0)
     assy.add(item, name=name, color=color)
