@@ -1070,7 +1070,7 @@ class VaneBladeAndEndwallBuilder:
 
     def _connector_polyline_pts(self, root_xy, end_xy, normal_xy):
         """返回翻折路径的有序点列表 (top → bottom):
-        blade 顶面 → 叶身-倒圆交界(z=r) → 倒圆面螺旋 → 缘板顶面 → 扩展曲线端点 → 缘板底面。
+        blade 顶面 → 叶身-倒圆交界(z=r) → 倒圆面螺旋 → 缘板顶面 → 扩展曲线端点。
 
         分叉点位于叶身-倒圆交界 (z=r, R)：两条相邻 band 的 side 线从 z=r 开始
         沿倒圆面螺旋到各自的扩展角度端点。
@@ -1128,7 +1128,6 @@ class VaneBladeAndEndwallBuilder:
             pts.append(self._v3(endwall_start, 0.0))
 
         pts.append(self._v3(end_xy, 0.0))
-        pts.append(self._v3(end_xy, -thickness))
         return pts
 
     def _make_surface_connector_wire(self, root_xy, end_xy, normal_xy):
