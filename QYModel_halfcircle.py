@@ -118,6 +118,68 @@ def connector_wire(theta_center_deg, sign):
     return make_polyline_edge(pts)
 
 
+def band_surface(theta_center_deg):
+    """Create band surface from symmetric spiral boundaries.
+
+    Loft arc edges at multiple ρ levels through fillet and endwall.
+    """
+    from OCP.BRepOffsetAPI import BRepOffsetAPI_ThruSections
+
+    θ_c = math.radians(theta_center_deg)
+    half_C = C / 2.0
+
+    # ρ sampling: fillet (r→r+R) + endwall top (r+R→r+R+off) + endwall bottom
+    rhos = []
+    n_f = N_SAMPLES // 2
+    for i in range(n_f + 1):
+        rhos.append(r_blade + R_fillet * i / n_f)
+    n_e = N_SAMPLES // 4
+    for i in range(1, n_e + 1):
+        rhos.append(r_blade + R_fillet + off * i / n_e)
+    # Add endpoint
+    rhos.append(r_blade + R_fillet + off)
+
+    edges = []
+    for rho in rhos:
+        θ_a = θ_c - half_C / rho
+        θ_b = θ_c + half_C / rho
+        # z height
+        if rho <= r_blade + R_fillet:
+            z = z_fillet(rho)
+        elif rho < r_blade + R_fillet + off:
+            z = 0.0
+        else:
+            z = -t
+
+        # Arc from θ_a to θ_b at radius rho, height z
+        arc = make_arc_edge_z(rho, math.degrees(θ_a), math.degrees(θ_b), z)
+        edges.append(arc)
+
+    if len(edges) < 2:
+        return None
+
+    try:
+        loft = BRepOffsetAPI_ThruSections(False, False, 1e-4)
+        for e in edges:
+            loft.AddWire(cq.Wire.assembleEdges([e]).wrapped)
+        loft.Build()
+        return cq.Face(loft.Shape())
+    except Exception as e:
+        print(f"    loft failed: {e}")
+        return None
+
+
+def make_arc_edge_z(radius, angle0_deg, angle1_deg, z):
+    """Create circular arc edge at given z height."""
+    a0 = math.radians(angle0_deg)
+    a1 = math.radians(angle1_deg)
+    p0 = cq.Vector(radius * math.cos(a0), radius * math.sin(a0), z)
+    p1 = cq.Vector(radius * math.cos(a1), radius * math.sin(a1), z)
+    mid = 0.5 * (a0 + a1)
+    pm = cq.Vector(radius * math.cos(mid), radius * math.sin(mid), z)
+    return cq.Edge.makeThreePointArc(p0, pm, p1)
+
+
 # ═══════════════════════════════════════════════════════════════
 # Build curves
 # ═══════════════════════════════════════════════════════════════
@@ -166,9 +228,15 @@ for idx in range(N_BANDS):
     # Side B: θ(ρ) = θ_c + C/(2ρ)  (sign=+1)
     curves[f"ply_band_{idx:04d}_side_b"] = connector_wire(θ_c, +1)
 
+    # Band surface: loft arcs from ρ=r to ρ=r+R+off
+    surf = band_surface(θ_c)
+    if surf is not None:
+        curves[f"ply_band_{idx:04d}_surface"] = surf
+
     print(f"  band {idx}: center={θ_c:.1f}° "
           f"blade[{θ0:.1f}°→{θ1:.1f}°] span={θ1-θ0:.1f}° "
-          f"expanded[{θ_a_exp:.1f}°→{θ_b_exp:.1f}°] span={θ_b_exp-θ_a_exp:.1f}°")
+          f"expanded[{θ_a_exp:.1f}°→{θ_b_exp:.1f}°] span={θ_b_exp-θ_a_exp:.1f}° "
+          f"surf={'OK' if surf is not None else 'FAIL'}")
 
 # ═══════════════════════════════════════════════════════════════
 # Export STEP
@@ -179,7 +247,7 @@ step_path = current_dir / "halfcircle_curves.step"
 
 assy = cq.Assembly(name="HALFCIRCLE_CURVES")
 
-for name, wire in curves.items():
+for name, item in curves.items():
     if "station" in name:
         color = cq.Color(1.0, 1.0, 0.0)  # yellow
     elif "side_a" in name:
@@ -190,9 +258,14 @@ for name, wire in curves.items():
         color = cq.Color(0.0, 1.0, 0.0)  # green
     elif "expanded_equal_arc" in name:
         color = cq.Color(1.0, 0.5, 0.0)  # orange
+    elif "surface" in name:
+        hue = int(name.split("_")[2]) / max(N_BANDS - 1, 1)
+        import colorsys
+        rc, gc, bc = colorsys.hsv_to_rgb(hue, 0.5, 0.7)
+        color = cq.Color(rc, gc, bc, 0.6)
     else:
         color = cq.Color(1.0, 1.0, 1.0)
-    assy.add(wire, name=name, color=color)
+    assy.add(item, name=name, color=color)
 
 if step_path.exists():
     step_path.unlink()
