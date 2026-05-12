@@ -21,7 +21,9 @@ N_SAMPLES = 40
 C_outer = r_blade * math.radians(Δθ_deg)
 C_inner = (r_blade - t) * math.radians(Δθ_deg)
 ρ_end_outer = r_blade + R_fillet + off  # 95
-ρ_end_inner = (r_blade - t) + (R_fillet + t) + off - t  # 32+3+60-1=94
+# Inner: fillet bottom at ρ=35-t, endwall end at ρ=95-2t (proportionally narrower)
+ρ_bot_inner = r_blade + R_fillet - t  # 34
+ρ_end_inner = ρ_end_outer - 2 * t      # 93
 
 print(f"C_outer = {C_outer:.4f}, C_inner = {C_inner:.4f}")
 
@@ -96,15 +98,26 @@ def side_wire(sign, inner=False):
         θ = θ_c + sign * hC / ρ
         pts.append(v3(ρ * math.cos(θ), ρ * math.sin(θ), z))
 
-    # Fillet bottom
-    z_bot = -t if inner else 0.0
+    # Fillet bottom / endwall start
+    if inner:
+        ρ_ew_start = ρ_bot_inner
+        z_bot = -t
+    else:
+        ρ_ew_start = ρ_bot
+        z_bot = 0.0
     θ_bot = θ_c + sign * hC / ρ_bot
+    # Add fillet bottom point at actual ρ_bot (35, on the surface)
     pts.append(v3(ρ_bot * math.cos(θ_bot), ρ_bot * math.sin(θ_bot), z_bot))
+
+    # Bridge from fillet bottom to endwall start (if different)
+    if abs(ρ_ew_start - ρ_bot) > 0.01:
+        θ_ew = θ_c + sign * hC / ρ_ew_start
+        pts.append(v3(ρ_ew_start * math.cos(θ_ew), ρ_ew_start * math.sin(θ_ew), z_bot))
 
     # Endwall
     n_e = N_SAMPLES // 2
     for i in range(1, n_e + 1):
-        ρ = ρ_bot + (ρ_ew_end - ρ_bot) * i / n_e
+        ρ = ρ_ew_start + (ρ_ew_end - ρ_ew_start) * i / n_e
         θ = θ_c + sign * hC / ρ
         z = -t if inner else 0.0
         pts.append(v3(ρ * math.cos(θ), ρ * math.sin(θ), z))
@@ -153,9 +166,9 @@ for label, ρ in [("blade", r_blade), ("fillet_bot", r_blade+R_fillet), ("endwal
     θ_b = θ_center + math.degrees(C_outer/(2*ρ))
     print(f"  ρ={ρ:3.0f}: {θ_a:.1f}° → {θ_b:.1f}°  span={θ_b-θ_a:.1f}°")
 
-print(f"\nInner (C={C_inner:.4f}):")
+print(f"\nInner (C={C_inner:.4f}, ρ_bot={ρ_bot_inner}, ρ_end={ρ_end_inner}):")
 print(f"  blade: same angles as outer (radial sides), ρ={r_blade-t}")
-for label, ρ in [("fillet_bot", r_blade+R_fillet), ("endwall", ρ_end_inner)]:
+for label, ρ in [("fillet_bot", r_blade+R_fillet), ("ew_inner", ρ_bot_inner), ("ew_outer", ρ_end_inner)]:
     θ_a = θ_center - math.degrees(C_inner/(2*ρ))
     θ_b = θ_center + math.degrees(C_inner/(2*ρ))
     print(f"  ρ={ρ:3.0f}: {θ_a:.1f}° → {θ_b:.1f}°  span={θ_b-θ_a:.1f}°")
